@@ -11,6 +11,6 @@ Set-Foreground $np.MainWindowHandle $np.Id
 $out = Stop-Watcher $w
 Stop-Process -Id $np.Id -ErrorAction SilentlyContinue
 
-Assert-Match $out '(?i)exe:\s+\S*\\notepad\.exe' 'notepad.exe'
+Assert-Match $out '(?i)exe:\s+[^\r\n]*\\notepad\.exe' 'notepad.exe'
 Assert-Match $out 'timechopper-smoke\.txt' 'notepad command line'
 Write-Host 'Notepad smoke test passed'

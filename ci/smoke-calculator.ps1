@@ -33,7 +33,7 @@ $out = Stop-Watcher $w
 Get-Process CalculatorApp, Calculator -ErrorAction SilentlyContinue | Stop-Process -Force
 
 Assert-Match $out 'class:\s+ApplicationFrameWindow' 'the UWP frame window'
-Assert-Match $out '(?i)host:\s+pid \d+, \S*\\ApplicationFrameHost\.exe' 'ApplicationFrameHost as host'
-Assert-Match $out '(?i)exe:\s+\S*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process'
-Assert-Match $once '(?i)exe:\s+\S*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process (--once)'
+Assert-Match $out '(?i)host:\s+pid \d+, [^\r\n]*\\ApplicationFrameHost\.exe' 'ApplicationFrameHost as host'
+Assert-Match $out '(?i)exe:\s+[^\r\n]*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process'
+Assert-Match $once '(?i)exe:\s+[^\r\n]*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process (--once)'
 Write-Host 'Calculator smoke test passed'
