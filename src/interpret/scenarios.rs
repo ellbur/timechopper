@@ -202,13 +202,58 @@ pub fn messy_day() -> Vec<Span> {
     s.finish()
 }
 
+/// Mail read in a tab of the browser the report is being researched in:
+/// once on its own first thing, once for forty seconds mid-report.
+pub fn webmail() -> Vec<Span> {
+    let gmail = page("Inbox (2) - Gmail");
+    let mut s = Script::at(8, 30);
+    s.focus(FIREFOX, &gmail, 300).idle(25 * 60);
+    s.focus(NOTEPAD, "report.txt - Notepad", 180)
+        .focus(FIREFOX, &page("How to structure a quarterly report"), 90)
+        .focus(NOTEPAD, "*report.txt - Notepad", 240)
+        .focus(FIREFOX, &page("Quarterly report examples"), 60)
+        .focus(FIREFOX, &page("Inbox (3) - Gmail"), 40)
+        .focus(NOTEPAD, "*report.txt - Notepad", 300)
+        .focus(FIREFOX, &page("Thesaurus: synonyms for growth"), 45)
+        .focus(NOTEPAD, "report.txt - Notepad", 240);
+    s.finish()
+}
+
+/// Email dealt with first thing; after a break, two more looks at it during
+/// one stretch of programming.
+pub fn email_twice() -> Vec<Span> {
+    let mut s = Script::at(9, 0);
+    s.focus(OUTLOOK, "Inbox - Outlook", 360).idle(20 * 60);
+    programming(&mut s, "timechopper", ["main.rs", "win.rs"], "Rust", 2);
+    s.focus(OUTLOOK, "Inbox - Outlook", 30);
+    programming(&mut s, "timechopper", ["win.rs", "main.rs"], "Rust", 1);
+    s.focus(OUTLOOK, "Inbox - Outlook", 45);
+    programming(&mut s, "timechopper", ["main.rs", "win.rs"], "Rust", 2);
+    s.finish()
+}
+
+/// One project, then another, with far more time spent reading in the
+/// browser than typing in the editor.
+pub fn buried_switch() -> Vec<Span> {
+    let mut s = Script::at(9, 0);
+    let mut reading = 0;
+    for project in ["timechopper", "billing"] {
+        for round in 0..5 {
+            reading += 1;
+            s.focus(CODE, &code(["lib.rs", "api.rs"][round % 2], project), 80)
+                .focus(FIREFOX, &page(&format!("Search result {reading}")), 320);
+        }
+    }
+    s.finish()
+}
+
 pub struct Scenario {
     pub name: &'static str,
     pub about: &'static str,
     pub spans: fn() -> Vec<Span>,
 }
 
-pub const ALL: [Scenario; 6] = [
+pub const ALL: [Scenario; 9] = [
     Scenario {
         name: "alternation",
         about: "Back and forth between Notepad and a browser.",
@@ -238,5 +283,20 @@ pub const ALL: [Scenario; 6] = [
         name: "messy-day",
         about: "Email now and then, two projects, a meeting, a report, lunch.",
         spans: messy_day,
+    },
+    Scenario {
+        name: "webmail",
+        about: "Mail in a tab of the browser the task is using.",
+        spans: webmail,
+    },
+    Scenario {
+        name: "email-twice",
+        about: "Two looks at email during one stretch of programming.",
+        spans: email_twice,
+    },
+    Scenario {
+        name: "buried-switch",
+        about: "A change of project, with most of the time spent in the browser.",
+        spans: buried_switch,
     },
 ];

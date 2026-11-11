@@ -1,7 +1,11 @@
 //! The interpretation, tried on synthetic working days.
 
+mod common;
+
+use common::check;
+use timechopper::interpret::render::{Detail, render};
 use timechopper::interpret::scenarios::{self, CODE, FIREFOX, NOTEPAD, OUTLOOK, Script, TERMINAL};
-use timechopper::interpret::{Hint, Lens, Params, Pattern, Span, Timeline, interpret, render};
+use timechopper::interpret::{Hint, Lens, Params, Pattern, Span, Time, Timeline, interpret};
 
 fn guess(spans: &[Span]) -> Timeline {
     read(spans, &[])
@@ -16,53 +20,6 @@ fn read(spans: &[Span], hints: &[Hint]) -> Timeline {
 fn secs_in(spans: &[Span], app: &str) -> u64 {
     let of_app = spans.iter().filter(|s| s.window.app == app);
     of_app.map(Span::secs).sum()
-}
-
-/// What must hold for any log under any hints: every second of every span
-/// is counted in exactly one session of exactly one task.
-fn check(spans: &[Span], timeline: &Timeline) {
-    let tracked: u64 = spans.iter().map(Span::secs).sum();
-    assert_eq!(timeline.tracked, tracked);
-    assert_eq!(
-        timeline.tasks.iter().map(|t| t.active).sum::<u64>(),
-        tracked
-    );
-    assert_eq!(
-        timeline.sessions.iter().map(|s| s.active).sum::<u64>(),
-        tracked
-    );
-
-    let mut owner = vec![None; spans.len()];
-    for (i, session) in timeline.sessions.iter().enumerate() {
-        assert!(timeline.tasks[session.task].sessions.contains(&i));
-        assert!(session.active <= session.end.0 - session.start.0);
-        let mut active = 0;
-        for &span in &session.spans {
-            assert_eq!(owner[span].replace(i), None, "span in two sessions");
-            assert!(session.start <= spans[span].start && spans[span].end <= session.end);
-            active += spans[span].secs();
-        }
-        assert_eq!(session.active, active);
-        if let Some(parent) = session.parent {
-            let parent = &timeline.sessions[parent];
-            assert!(parent.start <= session.start && session.end <= parent.end);
-            assert!(parent.elsewhere() >= session.active);
-        }
-    }
-    assert!(owner.iter().all(Option::is_some), "span in no session");
-
-    for (t, task) in timeline.tasks.iter().enumerate() {
-        let sessions = task.sessions.iter().map(|&s| &timeline.sessions[s]);
-        assert_eq!(sessions.clone().map(|s| s.active).sum::<u64>(), task.active);
-        assert!(sessions.clone().all(|s| s.task == t));
-        // A task's own sessions follow one another.
-        assert!(
-            sessions
-                .clone()
-                .zip(sessions.skip(1))
-                .all(|(a, b)| a.end < b.start)
-        );
-    }
 }
 
 #[test]
@@ -110,7 +67,7 @@ fn email_is_carved_out_without_splitting_the_task() {
 #[test]
 fn hint_makes_an_alternation_two_parallel_tasks() {
     let spans = scenarios::carve_out();
-    let timeline = read(&spans, &[Hint::Apart(Pattern::app("notepad"))]);
+    let timeline = read(&spans, &[Hint::apart(Pattern::app("notepad"))]);
     assert_eq!(timeline.tasks.len(), 3);
     assert_eq!(timeline.sessions.len(), 3);
 
@@ -270,7 +227,7 @@ fn a_messy_day() {
     let extent = spans.last().unwrap().end.0 - spans[0].start.0;
     assert_eq!(timeline.tracked, extent - 45 * 60);
 
-    let text = render::render(&timeline);
+    let text = render(&timeline, Detail::Doubts);
     assert!(text.contains("part 2 of 2"), "{text}");
     assert!(text.contains("  tracked\n"), "{text}");
 }
@@ -280,7 +237,7 @@ fn a_task_of_its_own_runs_alongside_everything() {
     // The terminal, declared its own task, runs alongside the programming
     // instead of being part of it.
     let spans = scenarios::messy_day();
-    let timeline = read(&spans, &[Hint::Apart(Pattern::app(TERMINAL))]);
+    let timeline = read(&spans, &[Hint::apart(Pattern::app(TERMINAL))]);
     let terminal = timeline
         .tasks
         .iter()
@@ -305,49 +262,87 @@ fn a_task_of_its_own_runs_alongside_everything() {
     assert_eq!(parent.label.headline, "timechopper");
 }
 
+/// A small deterministic source of arbitrary choices.
+struct Dice(u64);
+
+impl Dice {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+
+    fn pick<T: Clone>(&mut self, from: &[T]) -> T {
+        from[self.below(from.len() as u64) as usize].clone()
+    }
+
+    /// Any moment of the day, whether or not anything was in focus.
+    fn moment(&mut self) -> Time {
+        Time(8 * 3600 + self.below(6 * 3600))
+    }
+
+    fn range(&mut self) -> (Time, Time) {
+        let from = self.moment();
+        (from, Time(from.0 + self.below(3600)))
+    }
+}
+
 /// Times add up for any log and any hints, not just the tidy ones.
 #[test]
 fn every_second_is_counted_once() {
     let apps = [NOTEPAD, FIREFOX, OUTLOOK, CODE, TERMINAL];
     let titles = ["a - X", "b - X", "c | d - Notepad", "Untitled", "", "a — b"];
-    let hints = [
-        vec![],
-        vec![Hint::Apart(Pattern::app(FIREFOX))],
-        vec![
-            Hint::Together(Pattern::app(NOTEPAD), Pattern::title("a")),
-            Hint::Apart(Pattern::title("b")),
-            Hint::Lens {
-                app: CODE.to_string(),
-                lens: Lens::Title,
-            },
-        ],
-    ];
-    let mut seed: u64 = 42;
-    let mut random = |below: u64| {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (seed >> 33) % below
-    };
-    for round in 0..300 {
+    let mut dice = Dice(42);
+    for round in 0..400 {
         let mut script = Script::at(8, 0);
-        for _ in 0..random(60) {
-            let secs = match random(10) {
-                0 => 1200 + random(3600),
-                _ => 1 + random(400),
+        for _ in 0..dice.below(60) {
+            let secs = match dice.below(10) {
+                0 => 1200 + dice.below(3600),
+                _ => 1 + dice.below(400),
             };
-            match random(12) {
+            match dice.below(12) {
                 0 => script.idle(secs),
-                _ => script.focus(apps[random(5) as usize], titles[random(6) as usize], secs),
+                _ => script.focus(dice.pick(&apps), dice.pick(&titles), secs),
             };
         }
         let spans = script.finish();
+        let mut hints = Vec::new();
+        for _ in 0..dice.below(6) {
+            hints.push(match dice.below(8) {
+                0 => Hint::apart(Pattern::app(dice.pick(&apps))),
+                1 => Hint::Apart {
+                    pattern: Pattern::title("b"),
+                    during: vec![dice.range(), dice.range()],
+                },
+                2 => Hint::Together(Pattern::app(NOTEPAD), Pattern::title("a")),
+                3 => Hint::Lens {
+                    app: CODE.to_string(),
+                    lens: dice.pick(&[Lens::Title, Lens::App]),
+                },
+                4 => Hint::Split { at: dice.moment() },
+                5 => Hint::Join {
+                    from: dice.moment(),
+                    into: dice.moment(),
+                },
+                6 => Hint::Name {
+                    at: dice.moment(),
+                    name: dice.pick(&["x", "y"]).to_string(),
+                },
+                _ => Hint::Fixed {
+                    name: dice.pick(&[None, Some("x".to_string())]),
+                    intervals: vec![dice.range(), dice.range()],
+                },
+            });
+        }
         let params = Params {
             max_gap: [60, 900, 7200][round % 3],
             min_exclusive_share: [0.5, 0.2][round % 2],
+            near_miss_share: [0.25, 0.0][round % 2],
         };
-        let timeline = interpret(&spans, &hints[round % 3], &params);
+        let timeline = interpret(&spans, &hints, &params);
         check(&spans, &timeline);
-        render::render(&timeline);
+        render(&timeline, Detail::Contents);
     }
 }

@@ -6,7 +6,8 @@ mod win;
 
 use std::process::ExitCode;
 
-use timechopper::interpret::{self, Hint, Lens, Params, Pattern, Span, model, render, scenarios};
+use timechopper::interpret::render::{Detail, render};
+use timechopper::interpret::{Hint, Journal, Lens, Params, Pattern, Span, Time, model, scenarios};
 
 const USAGE: &str = "\
 Usage: timechopper [--once] [--exit-after <SECONDS>]
@@ -25,14 +26,27 @@ summarize reads a focus log (one line per focus change: HH:MM:SS APP TITLE,
 with APP '-' when nothing is in use) and prints the tasks it seems to show.
 demo does the same for built-in synthetic logs; --log prints the log itself.
 
-Interpretation options, to correct the guess:
-  --apart <PATTERN>               These windows are a task of their own
+Each row is followed by '?' lines pointing at what the guess is least sure of.
+
+Interpretation options:
+  --contents                      List everything swept into each row
+  --until <TIME>                  Interpret the log as it stood at TIME
+  --max-gap <MINUTES>             Longest interruption a task carries on
+                                  through (default 15)
+To correct the guess:
+  --apart <PATTERN>[@<TIME>-<TIME>]
+                                  These windows are a task of their own
+                                  (always, or between those times)
   --together <PATTERN> <PATTERN>  These windows belong to the same task
   --lens <APP>=<auto|app|title>   How much of this app's titles tells its
                                   windows apart
-  --max-gap <MINUTES>             Longest interruption a task carries on
-                                  through (default 15)
+  --split <TIME>                  The task in focus at TIME is a different
+                                  task from then on
+  --join <TIME> <TIME>            The row in focus at the first TIME belongs
+                                  to the task in focus at the second
+  --name <TIME> <NAME>            What to call the task in focus at TIME
 A PATTERN is APP, APP:TEXT or :TEXT, where TEXT is part of a window title.
+A TIME is HH:MM or HH:MM:SS.
 ";
 
 pub struct Options {
@@ -57,6 +71,12 @@ enum Command {
 struct Reading {
     hints: Vec<Hint>,
     params: Params,
+    detail: Detail,
+    until: Option<Time>,
+}
+
+fn time(text: &str) -> Result<Time, String> {
+    Time::parse(text).ok_or(format!("invalid time: {text}"))
 }
 
 impl Reading {
@@ -68,9 +88,21 @@ impl Reading {
     ) -> Result<bool, String> {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg {
+            "--contents" => self.detail = Detail::Contents,
+            "--until" => self.until = Some(time(&value("a time")?)?),
             "--apart" => {
-                let pattern = Pattern::parse(&value("a pattern")?)?;
-                self.hints.push(Hint::Apart(pattern));
+                let v = value("a pattern")?;
+                // A trailing @FROM-TO limits the pattern to those times.
+                let range = v.rsplit_once('@').and_then(|(pattern, range)| {
+                    let (from, to) = range.split_once('-')?;
+                    Some((pattern, (Time::parse(from)?, Time::parse(to)?)))
+                });
+                let (pattern, during) = match range {
+                    Some((pattern, range)) => (pattern, vec![range]),
+                    None => (v.as_str(), Vec::new()),
+                };
+                let pattern = Pattern::parse(pattern)?;
+                self.hints.push(Hint::Apart { pattern, during });
             }
             "--together" => {
                 let a = Pattern::parse(&value("two patterns")?)?;
@@ -90,6 +122,20 @@ impl Reading {
                     app: app.to_string(),
                     lens,
                 });
+            }
+            "--split" => {
+                let at = time(&value("a time")?)?;
+                self.hints.push(Hint::Split { at });
+            }
+            "--join" => {
+                let from = time(&value("two times")?)?;
+                let into = time(&value("two times")?)?;
+                self.hints.push(Hint::Join { from, into });
+            }
+            "--name" => {
+                let at = time(&value("a time and a name")?)?;
+                let name = value("a time and a name")?;
+                self.hints.push(Hint::Name { at, name });
             }
             "--max-gap" => {
                 let v = value("a number of minutes")?;
@@ -172,13 +218,32 @@ fn main() -> ExitCode {
 }
 
 fn print_timeline(spans: &[Span], reading: &Reading) {
-    let timeline = interpret::interpret(spans, &reading.hints, &reading.params);
+    // Replay the log the way the watcher would feed it, stopping early if
+    // asked to show how things stood at some point.
+    let mut journal = Journal::new(reading.params.clone());
+    let end = spans.last().map_or(Time(0), |s| s.end);
+    let now = reading.until.map_or(end, |t| t.min(end));
+    let mut free = Time(0);
+    for span in spans.iter().filter(|s| s.start < now) {
+        if span.start > free {
+            journal.observe(free, None);
+        }
+        journal.observe(span.start, Some(span.window.clone()));
+        free = span.end;
+    }
+    if free < now {
+        journal.observe(free, None);
+    }
+    for hint in &reading.hints {
+        journal.apply(hint.clone());
+    }
+    let timeline = journal.timeline(now);
     println!(
         "{} focus changes, {} rows:\n",
-        spans.len(),
+        journal.spans(now).len(),
         timeline.sessions.len()
     );
-    print!("{}", render::render(&timeline));
+    print!("{}", render(&timeline, reading.detail));
 }
 
 fn summarize(path: &str, reading: &Reading) -> Result<(), String> {

@@ -16,10 +16,11 @@ const UNINFORMATIVE: [&str; 2] = ["untitled", "new tab"];
 /// How much of a window's title counts towards its identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lens {
-    /// The one part of the title that keeps coming back and that the app
-    /// spends the most time on (a project rather than each of its files, a
-    /// site rather than each of its pages). Windows without such a part are
-    /// identified by their app alone.
+    /// One part of the title: the part that, for this app, changes least
+    /// from one visit to the next (a project rather than each of its files,
+    /// a site rather than each of its pages), provided the window's value
+    /// for it was returned to or outlasted a change of title. Windows that
+    /// offer no such part are identified by their app alone.
     Auto,
     /// Ignore the title: all windows of the app are the same activity.
     App,
@@ -114,9 +115,12 @@ pub struct Titles {
     stems: Vec<String>,
     subjects: Vec<Vec<String>>,
     display: HashMap<String, String>,
-    /// Seconds spent on each (app, title part) that was returned to at least
-    /// once, which is what makes it an identity rather than a passing page.
-    recurring: HashMap<(String, String), u64>,
+    /// Every (app, title part) that was returned to, or that stayed while
+    /// the rest of the title changed: an identity, not a passing page.
+    recurring: HashSet<(String, String)>,
+    /// Per app, the positions of title parts (counted from the app's name
+    /// outwards, starting at 1) from the steadiest to the most changeable.
+    steadiest: HashMap<String, Vec<usize>>,
 }
 
 impl Titles {
@@ -166,23 +170,63 @@ impl Titles {
             })
             .collect();
 
-        // Count visits to and time spent on every title part.
-        let mut stats: HashMap<(String, String), (usize, u64)> = HashMap::new();
+        // A title part is an identity, rather than a passing page, if it
+        // was returned to or stayed while the rest of the title changed.
+        #[derive(Default)]
+        struct Seen<'a> {
+            visits: usize,
+            titles: HashSet<&'a [String]>,
+        }
+        let mut seen: HashMap<(String, String), Seen> = HashMap::new();
         for i in 0..spans.len() {
             for part in &subjects[i] {
                 let continued = i > 0
                     && stems[i - 1] == stems[i]
                     && spans[i - 1].end == spans[i].start
                     && subjects[i - 1].contains(part);
-                let entry = stats.entry((stems[i].clone(), part.clone())).or_default();
-                entry.0 += usize::from(!continued);
-                entry.1 += spans[i].secs();
+                let entry = seen.entry((stems[i].clone(), part.clone())).or_default();
+                entry.visits += usize::from(!continued);
+                entry.titles.insert(&subjects[i]);
             }
         }
-        let recurring = stats
+        let recurring = seen
             .into_iter()
-            .filter(|((_, part), (visits, _))| *visits >= 2 && is_informative(part))
-            .map(|(key, (_, secs))| (key, secs))
+            .filter(|((_, part), seen)| {
+                (seen.visits >= 2 || seen.titles.len() >= 2) && is_informative(part)
+            })
+            .map(|(key, _)| key)
+            .collect();
+
+        // How often each position changes between one of the app's windows
+        // and its next: (changes, comparisons).
+        let mut changes: HashMap<&str, Vec<(u32, u32)>> = HashMap::new();
+        let mut previous: HashMap<&str, &[String]> = HashMap::new();
+        for (stem, subject) in stems.iter().zip(&subjects) {
+            let counts = changes.entry(stem).or_default();
+            if counts.len() < subject.len() {
+                counts.resize(subject.len(), (0, 0));
+            }
+            // The same title twice says nothing about what changes.
+            let before = previous.insert(stem, subject);
+            if let Some(before) = before.filter(|before| *before != subject.as_slice()) {
+                let pairs = before.iter().rev().zip(subject.iter().rev());
+                for (count, (a, b)) in counts.iter_mut().zip(pairs) {
+                    count.0 += u32::from(a != b);
+                    count.1 += 1;
+                }
+            }
+        }
+        let steadiest = changes
+            .into_iter()
+            .map(|(stem, counts)| {
+                let rate = |&(changed, compared): &(u32, u32)| match compared {
+                    0 => 1.0,
+                    _ => f64::from(changed) / f64::from(compared),
+                };
+                let mut order: Vec<usize> = (1..=counts.len()).collect();
+                order.sort_by(|&a, &b| rate(&counts[a - 1]).total_cmp(&rate(&counts[b - 1])));
+                (stem.to_string(), order)
+            })
             .collect();
 
         Titles {
@@ -190,6 +234,7 @@ impl Titles {
             subjects,
             display,
             recurring,
+            steadiest,
         }
     }
 
@@ -215,15 +260,11 @@ impl Titles {
         let subject = match lens {
             Lens::App => None,
             Lens::Title => Some(parts.join(" - ")).filter(|s| !s.is_empty()),
-            Lens::Auto => parts
+            Lens::Auto => self.steadiest[stem]
                 .iter()
-                .enumerate()
-                .filter_map(|(i, part)| {
-                    let secs = self.recurring.get(&(stem.clone(), part.clone()))?;
-                    Some((*secs, i, part))
-                })
-                .max()
-                .map(|(_, _, part)| part.clone()),
+                .filter_map(|&position| parts.get(parts.len().checked_sub(position)?))
+                .find(|part| self.recurring.contains(&(stem.clone(), (*part).clone())))
+                .cloned(),
         };
         Activity {
             app: stem.clone(),
@@ -358,7 +399,7 @@ mod tests {
         ]);
         let titles = Titles::learn(&spans);
         let auto = |i| titles.activity(i, Lens::Auto).to_string();
-        // The project recurs more than either file.
+        // The project stays put while the file changes.
         assert_eq!(auto(0), "code[timechopper]");
         assert_eq!(auto(2), "code[timechopper]");
         // Seen once: not an identity.
@@ -370,6 +411,25 @@ mod tests {
             "code[main.rs - timechopper]"
         );
         assert_eq!(titles.activity(0, Lens::App).to_string(), "code");
+    }
+
+    #[test]
+    fn auto_lens_goes_by_position_not_by_value() {
+        // Both projects have a main.rs, on which more time is spent than on
+        // either project; it is still the project that identifies a window.
+        let spans = log(&[
+            ("Code.exe", "main.rs - alpha - Visual Studio Code"),
+            ("Code.exe", "util.rs - alpha - Visual Studio Code"),
+            ("Code.exe", "main.rs - alpha - Visual Studio Code"),
+            ("Code.exe", "main.rs - beta - Visual Studio Code"),
+            ("Code.exe", "util.rs - beta - Visual Studio Code"),
+            ("Code.exe", "main.rs - beta - Visual Studio Code"),
+        ]);
+        let titles = Titles::learn(&spans);
+        let auto = |i| titles.activity(i, Lens::Auto).to_string();
+        assert_eq!(auto(0), "code[alpha]");
+        assert_eq!(auto(1), "code[alpha]");
+        assert_eq!(auto(3), "code[beta]");
     }
 
     #[test]
