@@ -1,0 +1,34 @@
+# Focus moves to Calculator, a UWP app whose top-level window belongs to
+# ApplicationFrameHost.exe: expect the host to be reported and the real app
+# process to be resolved.
+. (Join-Path $PSScriptRoot 'common.ps1')
+
+$pkg = Get-AppxPackage Microsoft.WindowsCalculator
+if (-not $pkg) {
+    Write-Host 'Calculator not installed; installing from the Microsoft Store via winget'
+    winget install --id 9WZDNCRFHVN5 --source msstore --exact --silent `
+        --accept-package-agreements --accept-source-agreements --disable-interactivity
+    $pkg = Get-AppxPackage Microsoft.WindowsCalculator
+    if (-not $pkg) { throw 'Calculator could not be installed' }
+}
+Write-Host "Calculator package: $($pkg.PackageFullName)"
+
+$w = Start-Watcher 30
+explorer.exe "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+
+$hwnd = [IntPtr]::Zero
+for ($i = 0; $i -lt 40 -and $hwnd -eq [IntPtr]::Zero; $i++) {
+    Start-Sleep -Milliseconds 500
+    $hwnd = [Win]::FindWindow('ApplicationFrameWindow', 'Calculator')
+}
+if ($hwnd -eq [IntPtr]::Zero) { throw 'Calculator window did not appear' }
+Start-Sleep -Seconds 2
+Set-Foreground $hwnd 'Calculator'
+
+$out = Stop-Watcher $w
+Get-Process CalculatorApp, Calculator -ErrorAction SilentlyContinue | Stop-Process -Force
+
+Assert-Match $out 'class:\s+ApplicationFrameWindow' 'the UWP frame window'
+Assert-Match $out '(?i)host:\s+pid \d+, \S*\\ApplicationFrameHost\.exe' 'ApplicationFrameHost as host'
+Assert-Match $out '(?i)exe:\s+\S*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process'
+Write-Host 'Calculator smoke test passed'
