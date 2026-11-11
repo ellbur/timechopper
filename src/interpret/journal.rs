@@ -9,6 +9,7 @@
 //! [`Timeline::name`], [`Timeline::confirm`]), may show what it would do
 //! ([`Journal::preview`]), and applies it ([`Journal::apply`]).
 
+use super::history::Lessons;
 use super::model::{Marker, Record, Span, Time, Window};
 use super::{Hint, Params, Pattern, Session, Timeline, interpret_marked};
 
@@ -20,6 +21,8 @@ pub struct Journal {
     open: Option<(Time, Window)>,
     marks: Vec<Marker>,
     hints: Vec<Hint>,
+    /// What earlier days teach, applied before the day's own corrections.
+    lessons: Lessons,
     pub params: Params,
 }
 
@@ -54,6 +57,15 @@ impl Journal {
             self.close(start, at, window);
         }
         self.open = window.map(|w| (at, w));
+    }
+
+    /// Carries over what earlier days teach (see [`super::history`]).
+    pub fn learn(&mut self, lessons: Lessons) {
+        self.lessons = lessons;
+    }
+
+    pub fn lessons(&self) -> &Lessons {
+        &self.lessons
     }
 
     /// Something was marked: by the user, or a window opening or closing.
@@ -116,7 +128,11 @@ impl Journal {
     /// The interpretation of everything up to `now`.
     pub fn timeline(&self, now: Time) -> Timeline {
         let marks: Vec<Marker> = self.marks.iter().filter(|m| m.at <= now).cloned().collect();
-        interpret_marked(&self.spans(now), &marks, &self.hints, &self.params)
+        let mut hints = self.lessons.standing();
+        hints.extend(self.hints.iter().cloned());
+        let mut timeline = interpret_marked(&self.spans(now), &marks, &hints, &self.params);
+        self.lessons.annotate(&mut timeline);
+        timeline
     }
 
     pub fn hints(&self) -> &[Hint] {

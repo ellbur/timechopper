@@ -28,9 +28,15 @@ use eframe::egui::{
     TextEdit, Ui,
 };
 
+use crate::interpret::history::{self, Precedent};
 use crate::interpret::model::{Event, Time, fmt_duration};
-use crate::interpret::{Diff, Doubt, Hint, Journal, Mark, Marker, Record, Scope, Timeline, Why};
+use crate::interpret::{
+    Diff, Doubt, Hint, Journal, Mark, Marker, Member, Record, Scope, Timeline, Why,
+};
 use crate::live::{Clock, LogFile, Observation};
+
+/// The colour of what may need the user's attention.
+const DOUBT: Color32 = Color32::from_rgb(0xf2, 0x8e, 0x2b);
 
 /// The colour of the user's markers.
 const MARKER: Color32 = Color32::from_rgb(0x76, 0xb7, 0xb2);
@@ -602,6 +608,11 @@ impl Live {
                     if session.elsewhere() > 0 {
                         notes.push(format!("{} elsewhere", fmt_duration(session.elsewhere())));
                     }
+                    if let [member] = &session.members[..]
+                        && let Some(p) = member.precedent.as_ref().filter(|p| p.applied)
+                    {
+                        notes.push(format!("own task, as on {}", history::days(&p.days)));
+                    }
                     let summary = ui.add(
                         egui::Label::new(RichText::new(notes.join(" · ")).small().weak())
                             .truncate()
@@ -622,6 +633,31 @@ impl Live {
     /// account of the day. With the row open, each can be acted on.
     fn markers(&mut self, ui: &mut Ui, t: &Timeline, i: usize, open: bool, acts: &mut Vec<Act>) {
         let session = &t.sessions[i];
+        // What earlier days say this row's task is called.
+        let task = &t.tasks[session.task];
+        if let Some((name, p)) = offered_name(t, i) {
+            ui.horizontal(|ui| {
+                let text = format!("? called \"{name}\" on {}", history::days(&p.days));
+                ui.label(RichText::new(text).small().color(DOUBT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.action(ui, "use", Some(t.name(i, &name)), acts);
+                });
+            });
+        }
+        if let Some(p) = task
+            .precedent
+            .as_ref()
+            .filter(|p| p.applied && p.name == task.name)
+            && open
+        {
+            ui.horizontal(|ui| {
+                let text = format!("named as on {}", history::days(&p.days));
+                ui.label(RichText::new(text).small().weak());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.action(ui, "not this", Some(t.name(i, "")), acts);
+                });
+            });
+        }
         let starts = session.opened_by.into_iter().map(|k| (k, true));
         for (k, first) in starts.chain(session.marks.iter().map(|&k| (k, false))) {
             let marker = &t.marks[k];
@@ -657,7 +693,7 @@ impl Live {
         ui.separator();
         for (m, member) in session.members.iter().enumerate() {
             ui.horizontal(|ui| {
-                let doubtful = !member.doubts.is_empty();
+                let doubtful = doubtful(member);
                 let marker = match doubtful {
                     true => RichText::new("?")
                         .color(Color32::from_rgb(0xf2, 0x8e, 0x2b))
@@ -688,6 +724,10 @@ impl Live {
                     });
                 }
             });
+            if let Some(p) = member.precedent.as_ref().filter(|p| !p.applied) {
+                let text = format!("    taken out of its row on {}", history::days(&p.days));
+                ui.label(RichText::new(text).small().weak());
+            }
             for doubt in &member.doubts {
                 let text = match doubt {
                     Doubt::Elsewhere { own: true, .. } => "also a task of its own".to_string(),
@@ -932,8 +972,21 @@ fn title_of(t: &Timeline, i: usize) -> String {
 
 fn doubt_count(t: &Timeline, i: usize) -> usize {
     let session = &t.sessions[i];
-    let members = session.members.iter().filter(|m| !m.doubts.is_empty());
-    members.count() + session.splits.len()
+    let members = session.members.iter().filter(|m| doubtful(m));
+    members.count() + session.splits.len() + usize::from(offered_name(t, i).is_some())
+}
+
+/// Whether something swept into a row may not belong there: it has an
+/// identity of its own, or it was taken out of rows on earlier days.
+fn doubtful(member: &Member) -> bool {
+    !member.doubts.is_empty() || member.precedent.as_ref().is_some_and(|p| !p.applied)
+}
+
+/// The name earlier days offer for a row's task, if it has none yet.
+fn offered_name(t: &Timeline, i: usize) -> Option<(String, &Precedent)> {
+    let task = &t.tasks[t.sessions[i].task];
+    let p = task.precedent.as_ref()?;
+    (task.name.is_none() && !p.applied).then(|| (p.name.clone().unwrap_or_default(), p))
 }
 
 fn why_text(why: Why) -> &'static str {
@@ -973,6 +1026,10 @@ pub fn describe_hint(hint: &Hint) -> String {
                 into.hm()
             )
         }
+        Hint::Name { at, name } if name.is_empty() => {
+            format!("Take away the name of the task at {}", at.hm())
+        }
         Hint::Name { at, name } => format!("Call the task at {} \"{name}\"", at.hm()),
+        Hint::Usual { activity, name } => format!("Work on {activity} is called \"{name}\""),
     }
 }

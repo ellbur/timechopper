@@ -65,6 +65,14 @@ fn harness() -> (Harness<'static, Live>, Rig) {
 /// A window keeping its log in the file at `log` (carrying on from what is
 /// already in it), with the clock at `now`.
 fn harness_logged(log: Option<&std::path::Path>, now: Time) -> (Harness<'static, Live>, Rig) {
+    harness_with(Journal::new(Params::default()), log, now)
+}
+
+fn harness_with(
+    journal: Journal,
+    log: Option<&std::path::Path>,
+    now: Time,
+) -> (Harness<'static, Live>, Rig) {
     let (send, feed) = mpsc::channel();
     let clock = Arc::new(AtomicU64::new(now.0));
     let reading = clock.clone();
@@ -76,12 +84,7 @@ fn harness_logged(log: Option<&std::path::Path>, now: Time) -> (Harness<'static,
         }
         None => (None, Vec::new()),
     };
-    let mut live = Live::new(
-        Journal::new(Params::default()),
-        feed,
-        Arc::new(clock_fn),
-        log,
-    );
+    let mut live = Live::new(journal, feed, Arc::new(clock_fn), log);
     live.resume(earlier);
     let harness = Harness::builder()
         .with_size(egui::vec2(400.0, 620.0))
@@ -399,4 +402,54 @@ fn corrections_are_kept_across_a_restart() {
     assert_eq!(text.matches(" @hint ").count(), 3);
     assert_eq!(text.matches(" @unhint").count(), 1);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn what_earlier_days_say_is_offered_then_applied() {
+    use timechopper::interpret::history::Lessons;
+    let days = scenarios::week();
+    let learned = |n: usize| {
+        let mut journal = Journal::new(Params::default());
+        journal.learn(Lessons::learn(&days[..n], &Params::default()));
+        journal
+    };
+
+    // Tuesday: Monday's name for the billing work is offered on its row.
+    let (mut h, rig) = harness_with(learned(1), None, Time::hms(8, 0, 0));
+    rig.play(&days[1].spans);
+    h.run();
+    assert!(h.query_by_label("? called \"Billing\" on Mon").is_some());
+    assert!(h.state().timeline().tasks.iter().all(|t| t.name.is_none()));
+    let uses: Vec<_> = h.get_all_by_label("use").collect();
+    // Two offers: Billing, and Monday's ticket number.
+    assert_eq!(uses.len(), 2);
+    // The offer for Billing is on the older row: the last one listed.
+    h.get_all_by_label("use").last().unwrap().click();
+    h.run();
+    let t = h.state().timeline();
+    assert!(t.tasks.iter().any(|t| t.name.as_deref() == Some("Billing")));
+    assert!(h.query_by_label("? called \"Billing\" on Mon").is_none());
+    drop(h);
+
+    // Thursday: applied without asking; "not this" takes it away.
+    let (mut h, rig) = harness_with(learned(3), None, Time::hms(8, 0, 0));
+    rig.play(&days[3].spans);
+    h.run();
+    let t = h.state().timeline().clone();
+    let billing = t
+        .sessions
+        .iter()
+        .position(|s| t.tasks[s.task].name.as_deref() == Some("Billing"))
+        .unwrap();
+    assert!(
+        h.query_by_label_contains("own task, as on Mon, Tue, Wed")
+            .is_some()
+    );
+    h.get_all_by_label("Billing").last().unwrap().click();
+    h.run();
+    assert!(h.query_by_label("named as on Mon, Tue, Wed").is_some());
+    h.get_by_label("not this").click();
+    h.run();
+    let t = h.state().timeline();
+    assert_eq!(t.tasks[t.sessions[billing].task].name, None);
 }

@@ -326,6 +326,78 @@ pub fn marked_day_marks() -> Vec<Marker> {
     marked_day_script().marks()
 }
 
+/// One working day of [`week`]: mail first thing, the billing project
+/// (with a glance at mail in the middle), then a helpdesk ticket. Returns
+/// the day and when the billing work, the glance at mail and the ticket
+/// started.
+fn workday(ticket: u32) -> (Vec<Span>, [(Time, Time); 3]) {
+    let mut s = Script::at(8, 30);
+    s.focus(FIREFOX, &page("Inbox (3) - Gmail"), 300)
+        .idle(25 * 60);
+    let billing = s.now;
+    s.focus(CODE, &code("lib.rs", "billing"), 600)
+        .focus(FIREFOX, &page("Rust docs: Vec"), 120)
+        .focus(CODE, &code("api.rs", "billing"), 600);
+    let mail = s.now;
+    s.focus(FIREFOX, &page("Inbox (4) - Gmail"), 40);
+    let mail = (mail, s.now);
+    s.focus(CODE, &code("lib.rs", "billing"), 600)
+        .focus(FIREFOX, &page("Rust docs: HashMap"), 120)
+        .focus(CODE, &code("api.rs", "billing"), 300)
+        .idle(20 * 60);
+    let helpdesk = s.now;
+    let ticket = format!("Ticket {ticket} - Helpdesk");
+    s.focus(FIREFOX, &page(&ticket), 300)
+        .focus(TERMINAL, "PowerShell", 200)
+        .focus(FIREFOX, &page(&ticket), 300)
+        .focus(TERMINAL, "PowerShell", 200);
+    let end = s.now;
+    (s.finish(), [(billing, billing), mail, (helpdesk, end)])
+}
+
+/// A synthetic working week. On Monday to Wednesday the user names the
+/// billing work "Billing" and the ticket after its number (a different one
+/// each day), and takes the glance at webmail out of the billing row. On
+/// Thursday and Friday they correct nothing: what those days show comes
+/// from the days before.
+pub fn week() -> Vec<crate::interpret::history::Day> {
+    use crate::interpret::history::Day;
+    use crate::interpret::{Hint, Pattern};
+    let labels = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+    let tickets = [123, 145, 160, 171, 188];
+    labels
+        .iter()
+        .zip(tickets)
+        .enumerate()
+        .map(|(n, (label, ticket))| {
+            let (spans, [(billing, _), mail, (helpdesk, _)]) = workday(ticket);
+            let hints = match n < 3 {
+                true => vec![
+                    Hint::Name {
+                        at: billing,
+                        name: "Billing".into(),
+                    },
+                    Hint::Name {
+                        at: helpdesk,
+                        name: format!("Ticket {ticket}"),
+                    },
+                    Hint::Apart {
+                        pattern: Pattern::app(FIREFOX),
+                        during: vec![mail],
+                    },
+                ],
+                false => Vec::new(),
+            };
+            Day {
+                label: label.to_string(),
+                spans,
+                marks: Vec::new(),
+                hints,
+            }
+        })
+        .collect()
+}
+
 fn no_marks() -> Vec<Marker> {
     Vec::new()
 }

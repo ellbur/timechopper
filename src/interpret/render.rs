@@ -1,5 +1,6 @@
 //! A timeline as text.
 
+use super::history::days;
 use super::model::fmt_duration;
 use super::{Doubt, Label, Member, Timeline, Why};
 
@@ -27,6 +28,9 @@ fn describe(name: Option<&String>, label: &Label) -> String {
 
 fn doubts(member: &Member) -> Vec<String> {
     let mut out = Vec::new();
+    if let Some(p) = member.precedent.as_ref().filter(|p| !p.applied) {
+        out.push(format!("taken out of its row on {}", days(&p.days)));
+    }
     for doubt in &member.doubts {
         // If it also got in on a weak reason, say so.
         if member.why == Why::SameApp {
@@ -75,6 +79,18 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
         if session.elsewhere() > 0 {
             notes.push(format!("{} elsewhere", fmt_duration(session.elsewhere())));
         }
+        // What earlier days decided for it.
+        if let Some(p) = &task.precedent
+            && p.applied
+            && p.name == task.name
+        {
+            notes.push(format!("named as on {}", days(&p.days)));
+        }
+        if let [member] = &session.members[..]
+            && let Some(p) = member.precedent.as_ref().filter(|p| p.applied)
+        {
+            notes.push(format!("own task, as on {}", days(&p.days)));
+        }
         let notes = match notes.is_empty() {
             true => String::new(),
             false => format!("  ({})", notes.join(", ")),
@@ -95,6 +111,11 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
         if let Some(k) = session.opened_by {
             let m = &timeline.marks[k];
             line('>', format!("{}  {} (starts here)", m.at.hm(), m.mark));
+        }
+        if let Some(p) = &task.precedent
+            && let (None, Some(name), false) = (&task.name, &p.name, p.applied)
+        {
+            line('?', format!("called \"{name}\" on {}", days(&p.days)));
         }
         for &k in &session.marks {
             let m = &timeline.marks[k];

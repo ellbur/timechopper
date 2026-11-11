@@ -25,6 +25,7 @@
 //! function of the log and the hints; [`journal::Journal`] holds both for a
 //! log that is still growing, and turns "do this to that row" into hints.
 
+pub mod history;
 pub mod journal;
 pub mod model;
 pub mod render;
@@ -75,8 +76,13 @@ pub enum Hint {
     /// The session in focus at `from` belongs to the task in focus at `into`.
     Join { from: Time, into: Time },
     /// What the user calls the task in focus at this time. Tasks given the
-    /// same name are the same task.
+    /// same name are the same task. An empty name takes away the name the
+    /// task had (one carried over from earlier days, say).
     Name { at: Time, name: String },
+    /// A standing rule, learned from earlier days: a task whose
+    /// [`Task::identity`] is this activity is called this. Applied before
+    /// any [`Hint::Name`], which overrides it.
+    Usual { activity: Activity, name: String },
 }
 
 impl Hint {
@@ -117,6 +123,12 @@ impl Hint {
             Hint::Split { at } => vec!["split".into(), at.to_string()],
             Hint::Join { from, into } => vec!["join".into(), from.to_string(), into.to_string()],
             Hint::Name { at, name } => vec!["name".into(), at.to_string(), clean(name)],
+            Hint::Usual { activity, name } => vec![
+                "usual".into(),
+                clean(&activity.app),
+                clean(activity.subject.as_deref().unwrap_or("")),
+                clean(name),
+            ],
         };
         fields.join("\t")
     }
@@ -165,6 +177,18 @@ impl Hint {
             ["join", from, into] => Hint::Join {
                 from: time(from)?,
                 into: time(into)?,
+            },
+            // An empty name at the end of a line may have been trimmed off.
+            ["name", at] => Hint::Name {
+                at: time(at)?,
+                name: String::new(),
+            },
+            ["usual", app, subject, name] => Hint::Usual {
+                activity: Activity {
+                    app: app.to_string(),
+                    subject: (!subject.is_empty()).then(|| subject.to_string()),
+                },
+                name: name.to_string(),
             },
             ["name", at, name] => Hint::Name {
                 at: time(at)?,
@@ -269,6 +293,9 @@ pub struct Member {
     pub doubts: Vec<Doubt>,
     /// Indexes into [`Timeline::spans`].
     pub spans: Vec<usize>,
+    /// Whether, on earlier days, the user took it out of the task it was
+    /// swept into: filled in by [`history::Lessons::annotate`].
+    pub precedent: Option<history::Precedent>,
 }
 
 /// A point inside a session where one task may have given way to another
@@ -284,8 +311,15 @@ pub struct PossibleSplit {
 /// Something the user was working on.
 #[derive(Clone, Debug)]
 pub struct Task {
-    /// The name the user gave it, if any.
+    /// The name the user gave it, if any (or one carried over from earlier
+    /// days: see `precedent`).
     pub name: Option<String>,
+    /// What identifies it from one day to the next: the activity with a
+    /// subject (a project, a site) that took the most time, if any did.
+    pub identity: Option<Activity>,
+    /// What earlier days say it is called, if they say anything: filled in
+    /// by [`history::Lessons::annotate`].
+    pub precedent: Option<history::Precedent>,
     pub label: Label,
     /// The activities that make it up, most time first.
     pub activities: Vec<Activity>,
@@ -518,6 +552,18 @@ pub fn interpret_marked(
     guess(spans, &marks, &decided, params)
 }
 
+/// The activity with a subject that took the most time in these runs.
+fn identity(runs: &[Run], activities: &[Activity]) -> Option<Activity> {
+    let mut secs: HashMap<usize, u64> = HashMap::new();
+    for run in runs {
+        *secs.entry(run.activity).or_default() += run.end.0 - run.start.0;
+    }
+    secs.into_iter()
+        .filter(|(a, _)| activities[*a].subject.is_some())
+        .max_by(|(a, x), (b, y)| x.cmp(y).then_with(|| activities[*b].cmp(&activities[*a])))
+        .map(|(a, _)| activities[a].clone())
+}
+
 /// One pass of interpretation; `marks` must be in time order.
 fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> Timeline {
     let marks = marks.to_vec();
@@ -702,11 +748,21 @@ fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> T
             _ => {}
         }
     }
+    // Names carried over from earlier days, then the user's own.
+    for hint in hints {
+        if let Hint::Usual { activity, name } = hint {
+            for draft in drafts.iter_mut().filter(|d| d.name.is_none()) {
+                if identity(&draft.runs, &activities).as_ref() == Some(activity) {
+                    draft.name = Some(name.clone());
+                }
+            }
+        }
+    }
     for hint in hints {
         if let Hint::Name { at, name } = hint
             && let Some(draft) = span_at(spans, *at).and_then(|i| owner(&drafts, i))
         {
-            drafts[draft].name = Some(name.clone());
+            drafts[draft].name = (!name.is_empty()).then(|| name.clone());
         }
     }
     for (h, members) in &confirmed {
@@ -765,6 +821,8 @@ fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> T
         let mut by_time: Vec<(u64, usize)> = secs.into_iter().map(|(a, s)| (s, a)).collect();
         by_time.sort_by_key(|&(s, a)| (std::cmp::Reverse(s), a));
         tasks.push(Task {
+            identity: identity(&draft.runs, &activities),
+            precedent: None,
             name: draft.name,
             label: describe.label(&all_spans),
             active: by_time.iter().map(|&(s, _)| s).sum(),
@@ -932,6 +990,7 @@ impl Describe<'_> {
                     why: Why::Once,
                     doubts: Vec::new(),
                     spans: Vec::new(),
+                    precedent: None,
                 });
                 members.len() - 1
             });

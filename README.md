@@ -88,6 +88,42 @@ file) and `src/win.rs` (`follow`: the watcher feeding the window).
 `tests/ui.rs` drives the window headlessly: focus changes arrive and buttons
 are clicked through the accessibility tree.
 
+### What earlier days teach
+
+Corrections are made at times of day, which mean nothing the next day, but
+they are about windows, which come back. When it starts, the live window
+re-reads the earlier logs in its folder (the latest 20), each with its own
+corrections, and learns two kinds of rule:
+
+- **Names.** A task you named was mostly about some project or site (its
+  identity: the activity with a subject that took the most time). Work on
+  the same thing another day is probably called the same.
+- **Separations.** Something you took out of a row (*own task…*) is a thing
+  of its own, done on the side: mail, chat.
+
+A rule from earlier days is evidence, not an order:
+
+- After one day it is **offered** on the row: `? called "Billing" on Mon`
+  with *use*; a window swept into a row says "taken out of its row on Mon".
+  A name that changes from day to day (a ticket number) is only offered
+  once the same name has held two days running.
+- After **three days in a row** it is **applied** without asking, and says
+  so ("named as on Mon, Tue, Wed", with *not this*; "own task, as on …").
+  Something you said was a task of its own *wherever it shows up* is applied
+  from the next day.
+- Your corrections today always win. Renaming, taking a name away (*not
+  this*), or joining a carved-out row back counts against the rule: it
+  starts again from there.
+
+Nothing is stored apart from the logs: the rules are worked out from them
+each time, so undoing a correction on an earlier day changes what is
+learned from it. `timechopper demo week` shows a synthetic week day by day;
+`summarize --history` learns from the logs beside the one it reads.
+
+Each day's window identity is still worked out from that day alone. A site
+seen only once in a day has no identity that day, so nothing learned about
+it applies.
+
 ## Interpreting a focus log
 
 ```

@@ -29,6 +29,9 @@ window's title changes.
 summarize reads a focus log (one line per focus change: HH:MM:SS APP TITLE,
 with APP '-' when nothing is in use) and prints the tasks it seems to show.
 demo does the same for built-in synthetic logs; --log prints the log itself.
+`demo week` shows a synthetic week, each day as it first looks with what the
+days before it teach: names and separations offered after one day, applied
+after three.
 
 ui opens a small window in the corner of the screen showing the day so far,
 grouped into tasks, up to the window in focus now, and lets you correct the
@@ -46,6 +49,8 @@ the guess would only offer; it never starts a task by itself.
 
 Interpretation options:
   --contents                      List everything swept into each row
+  --history                       Learn from the earlier logs in the same
+                                  folder (summarize; ui always does)
   --until <TIME>                  Interpret the log as it stood at TIME
   --max-gap <MINUTES>             Longest interruption a task carries on
                                   through (default 15)
@@ -92,12 +97,15 @@ pub struct UiOptions {
     pub params: Params,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Reading {
     hints: Vec<Hint>,
     params: Params,
     detail: Detail,
     until: Option<Time>,
+    /// Learn from the earlier logs in the same folder.
+    history: bool,
+    lessons: timechopper::interpret::history::Lessons,
 }
 
 fn time(text: &str) -> Result<Time, String> {
@@ -114,6 +122,7 @@ impl Reading {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg {
             "--contents" => self.detail = Detail::Contents,
+            "--history" => self.history = true,
             "--until" => self.until = Some(time(&value("a time")?)?),
             "--apart" => {
                 let v = value("a pattern")?;
@@ -277,6 +286,7 @@ fn print_timeline(spans: &[Span], marks: &[Marker], logged: &[Hint], reading: &R
     // Replay the log the way the watcher would feed it, stopping early if
     // asked to show how things stood at some point.
     let mut journal = Journal::new(reading.params.clone());
+    journal.learn(reading.lessons.clone());
     let end = spans.last().map_or(Time(0), |s| s.end);
     let now = reading.until.map_or(end, |t| t.min(end));
     let mut free = Time(0);
@@ -305,6 +315,16 @@ fn print_timeline(spans: &[Span], marks: &[Marker], logged: &[Hint], reading: &R
     print!("{}", render(&timeline, reading.detail));
 }
 
+/// What the logs before the one at `path` teach (see
+/// `timechopper::interpret::history`).
+fn learn(path: &std::path::Path, params: &Params) -> timechopper::interpret::history::Lessons {
+    let (days, skipped) = timechopper::live::earlier_days(path, 20);
+    for file in skipped {
+        eprintln!("timechopper: skipping an earlier log: {file}");
+    }
+    timechopper::interpret::history::Lessons::learn(&days, params)
+}
+
 fn summarize(path: &str, reading: &Reading) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let records = model::parse_records(&text).map_err(|e| format!("{path}: {e}"))?;
@@ -323,11 +343,48 @@ fn summarize(path: &str, reading: &Reading) -> Result<(), String> {
         }
     }
     let marks = model::markers(&records);
-    print_timeline(&model::spans(&events), &marks, hints.hints(), reading);
+    let mut reading = reading.clone();
+    if reading.history {
+        reading.lessons = learn(std::path::Path::new(path), &reading.params);
+    }
+    print_timeline(&model::spans(&events), &marks, hints.hints(), &reading);
+    Ok(())
+}
+
+/// The synthetic week: each day as it would look with what the days before
+/// it teach.
+fn week(reading: &Reading) -> Result<(), String> {
+    use timechopper::interpret::history::Lessons;
+    let days = scenarios::week();
+    for (n, day) in days.iter().enumerate() {
+        let lessons = Lessons::learn(&days[..n], &reading.params);
+        let mut journal = Journal::from_spans(day.spans.clone(), reading.params.clone());
+        journal.learn(lessons);
+        for hint in &reading.hints {
+            journal.apply(hint.clone());
+        }
+        let end = day.spans.last().map_or(Time(0), |s| s.end);
+        // The day as it first looks, before the user corrects anything.
+        println!("== {}, before any corrections", day.label);
+        print!("{}", render(&journal.timeline(end), reading.detail));
+        match day.hints.len() {
+            0 => println!("Corrections made: none\n"),
+            _ => {
+                println!("Corrections made:");
+                for hint in &day.hints {
+                    println!("  {}", timechopper::ui::describe_hint(hint));
+                }
+                println!();
+            }
+        }
+    }
     Ok(())
 }
 
 fn demo(name: Option<&str>, log: bool, reading: &Reading) -> Result<(), String> {
+    if name == Some("week") {
+        return week(reading);
+    }
     let chosen: Vec<_> = scenarios::ALL
         .iter()
         .filter(|s| name.is_none_or(|n| n == s.name))
@@ -370,7 +427,7 @@ fn live(opts: UiOptions) -> Result<(), String> {
             ctx.request_repaint();
         }
     };
-    let journal = Journal::new(opts.params.clone());
+    let mut journal = Journal::new(opts.params.clone());
     let (clock, feed, log): (Arc<dyn Clock>, _, _) = match &opts.replay {
         Some(name) => {
             let scenario = scenarios::ALL
@@ -388,6 +445,7 @@ fn live(opts: UiOptions) -> Result<(), String> {
             let (clock, feed, path) = watch(&opts, Box::new(wake))?;
             let (log, earlier) =
                 live::LogFile::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            journal.learn(learn(&path, &opts.params));
             (clock, feed, Some((log, earlier)))
         }
     };

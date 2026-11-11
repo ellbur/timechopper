@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use crate::interpret::history::Day;
 use crate::interpret::model::{self, Event, Marker, Record, Span, Time};
 
 /// What a watcher reports: focus moved (or went nowhere: idle, locked), or a
@@ -140,6 +141,44 @@ pub fn log_text(spans: &[Span], marks: &[Marker]) -> String {
         .collect()
 }
 
+/// The days logged before the one at `path`: the other `.log` files in its
+/// folder whose names sort before its own (so `2026-11-09.log` comes before
+/// `2026-11-10.log`), the latest `limit` of them, oldest first. A file that
+/// can't be read is skipped, and named in the second list.
+pub fn earlier_days(path: &Path, limit: usize) -> (Vec<Day>, Vec<String>) {
+    let (mut days, mut skipped) = (Vec::new(), Vec::new());
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Some(own) = path.file_name() else {
+        return (days, skipped);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (days, skipped);
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .filter(|p| p.file_name().is_some_and(|n| n < own))
+        .collect();
+    files.sort();
+    let first = files.len().saturating_sub(limit);
+    for file in &files[first..] {
+        let label = file
+            .file_stem()
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned());
+        let records = std::fs::read_to_string(file)
+            .map_err(|e| e.to_string())
+            .and_then(|text| model::parse_records(&text));
+        match records {
+            Ok(records) => days.push(Day::from_records(&label, &records)),
+            Err(e) => skipped.push(format!("{}: {e}", file.display())),
+        }
+    }
+    (days, skipped)
+}
+
 /// A focus log being written as things happen. Opening one that exists
 /// carries on from where it left off.
 pub struct LogFile {
@@ -232,6 +271,35 @@ mod tests {
         let (_, all) = LogFile::open(&path).unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all[3], focus(30, Some("b c")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn earlier_days_are_the_logs_before_this_one() {
+        let dir = std::env::temp_dir().join(format!("timechopper-days-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let day = log_text(&crate::interpret::scenarios::alternation(), &[]);
+        for name in [
+            "2026-11-06.log",
+            "2026-11-09.log",
+            "2026-11-10.log",
+            "2026-11-11.log",
+        ] {
+            std::fs::write(dir.join(name), &day).unwrap();
+        }
+        std::fs::write(dir.join("2026-11-07.log"), "nonsense\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a log").unwrap();
+        let labels =
+            |days: &[Day]| -> Vec<String> { days.iter().map(|d| d.label.clone()).collect() };
+        // The last two files before the 10th: the 7th can't be read.
+        let (days, skipped) = earlier_days(&dir.join("2026-11-10.log"), 2);
+        assert_eq!(labels(&days), ["2026-11-09"]);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("2026-11-07.log"));
+        let (days, _) = earlier_days(&dir.join("2026-11-10.log"), 10);
+        assert_eq!(labels(&days), ["2026-11-06", "2026-11-09"]);
+        assert!(days[0].spans == crate::interpret::scenarios::alternation());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
