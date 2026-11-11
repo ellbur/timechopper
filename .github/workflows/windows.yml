@@ -6,6 +6,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The interpretation of focus logs is plain Rust and runs anywhere.
+  interpret:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: cargo test
+
+      - name: Demo (synthetic logs)
+        run: cargo run --quiet -- demo
+
   build-and-test:
     runs-on: windows-latest
     steps:
@@ -22,6 +34,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
 
       - name: Build
         run: cargo build --release
