@@ -1,0 +1,79 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustc --version
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run --once
+        run: ./target/release/timechopper.exe --once
+
+      - name: Smoke test (focus change to Notepad)
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'watch.log'
+          $watcher = Start-Process -FilePath ./target/release/timechopper.exe `
+            -ArgumentList '--exit-after', '20' `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
+            -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+
+          $file = Join-Path $env:RUNNER_TEMP 'timechopper-smoke.txt'
+          Set-Content $file 'hello'
+          $np = Start-Process notepad.exe -ArgumentList "`"$file`"" -PassThru
+          Start-Sleep -Seconds 3
+
+          # Background processes can't always take focus; force it.
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Fg {
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+          }
+          '@
+          $np.Refresh()
+          Write-Host "notepad hwnd: $($np.MainWindowHandle)"
+          (New-Object -ComObject WScript.Shell).AppActivate($np.Id) | Out-Null
+          [Fg]::SetForegroundWindow($np.MainWindowHandle) | Out-Null
+          Start-Sleep -Seconds 2
+          Write-Host "foreground hwnd now: $([Fg]::GetForegroundWindow())"
+
+          $watcher.WaitForExit()
+          Stop-Process -Id $np.Id -ErrorAction SilentlyContinue
+
+          Write-Host '--- watcher stdout ---'
+          Get-Content $log
+          Write-Host '--- watcher stderr ---'
+          Get-Content "$log.err"
+
+          $out = Get-Content $log -Raw
+          if ($out -notmatch '(?i)exe:\s+\S*notepad\.exe') { throw 'watcher did not report notepad.exe' }
+          if ($out -notmatch 'timechopper-smoke\.txt') { throw 'watcher did not report notepad command line' }
+          Write-Host 'Smoke test passed'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timechopper-windows
+          path: target/release/timechopper.exe
