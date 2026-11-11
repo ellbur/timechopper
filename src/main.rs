@@ -271,7 +271,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_timeline(spans: &[Span], marks: &[Marker], reading: &Reading) {
+/// Prints the interpretation of a log, with the corrections kept in it
+/// (`logged`) followed by those given on the command line.
+fn print_timeline(spans: &[Span], marks: &[Marker], logged: &[Hint], reading: &Reading) {
     // Replay the log the way the watcher would feed it, stopping early if
     // asked to show how things stood at some point.
     let mut journal = Journal::new(reading.params.clone());
@@ -291,7 +293,7 @@ fn print_timeline(spans: &[Span], marks: &[Marker], reading: &Reading) {
     for marker in marks {
         journal.mark(marker.clone());
     }
-    for hint in &reading.hints {
+    for hint in logged.iter().chain(&reading.hints) {
         journal.apply(hint.clone());
     }
     let timeline = journal.timeline(now);
@@ -313,7 +315,15 @@ fn summarize(path: &str, reading: &Reading) -> Result<(), String> {
             _ => None,
         })
         .collect();
-    print_timeline(&model::spans(&events), &model::markers(&records), reading);
+    // The corrections still standing at the end of the log.
+    let mut hints = Journal::default();
+    for record in &records {
+        if let Record::Hint { .. } | Record::Unhint { .. } = record {
+            hints.record(record.clone());
+        }
+    }
+    let marks = model::markers(&records);
+    print_timeline(&model::spans(&events), &marks, hints.hints(), reading);
     Ok(())
 }
 
@@ -340,7 +350,7 @@ fn demo(name: Option<&str>, log: bool, reading: &Reading) -> Result<(), String> 
             println!();
         }
         println!("== {}: {}", scenario.name, scenario.about);
-        print_timeline(&spans, &marks, reading);
+        print_timeline(&spans, &marks, &[], reading);
     }
     Ok(())
 }
@@ -360,7 +370,7 @@ fn live(opts: UiOptions) -> Result<(), String> {
             ctx.request_repaint();
         }
     };
-    let mut journal = Journal::new(opts.params.clone());
+    let journal = Journal::new(opts.params.clone());
     let (clock, feed, log): (Arc<dyn Clock>, _, _) = match &opts.replay {
         Some(name) => {
             let scenario = scenarios::ALL
@@ -378,18 +388,19 @@ fn live(opts: UiOptions) -> Result<(), String> {
             let (clock, feed, path) = watch(&opts, Box::new(wake))?;
             let (log, earlier) =
                 live::LogFile::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            for record in earlier {
-                journal.record(record);
-            }
-            (clock, feed, Some(log))
+            (clock, feed, Some((log, earlier)))
         }
     };
     // Software rendering (no GPU, e.g. in a VM) is most likely to work with
     // wgpu on Windows and with OpenGL elsewhere; if the first choice can't
     // start, try the other.
-    let app = std::rc::Rc::new(std::cell::RefCell::new(Some(Live::new(
-        journal, feed, clock, log,
-    ))));
+    let (log, earlier) = match log {
+        Some((log, earlier)) => (Some(log), earlier),
+        None => (None, Vec::new()),
+    };
+    let mut live = Live::new(journal, feed, clock, log);
+    live.resume(earlier);
+    let app = std::rc::Rc::new(std::cell::RefCell::new(Some(live)));
     let renderers = match cfg!(windows) {
         true => [eframe::Renderer::Wgpu, eframe::Renderer::Glow],
         false => [eframe::Renderer::Glow, eframe::Renderer::Wgpu],

@@ -11,8 +11,10 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use timechopper::interpret::scenarios::{self, FIREFOX, NOTEPAD, OUTLOOK};
-use timechopper::interpret::{Event, Journal, Mark, Marker, Params, Record, Span, Time, Window};
-use timechopper::live::{self, FnClock, Observation};
+use timechopper::interpret::{
+    Event, Journal, Mark, Marker, Params, Record, Scope, Span, Time, Window,
+};
+use timechopper::live::{self, FnClock, LogFile, Observation};
 use timechopper::ui::Live;
 
 struct Rig {
@@ -57,16 +59,30 @@ impl Rig {
 }
 
 fn harness() -> (Harness<'static, Live>, Rig) {
+    harness_logged(None, Time::hms(9, 0, 0))
+}
+
+/// A window keeping its log in the file at `log` (carrying on from what is
+/// already in it), with the clock at `now`.
+fn harness_logged(log: Option<&std::path::Path>, now: Time) -> (Harness<'static, Live>, Rig) {
     let (send, feed) = mpsc::channel();
-    let clock = Arc::new(AtomicU64::new(Time::hms(9, 0, 0).0));
+    let clock = Arc::new(AtomicU64::new(now.0));
     let reading = clock.clone();
     let clock_fn = FnClock(move || Time(reading.load(Ordering::SeqCst)));
-    let live = Live::new(
+    let (log, earlier) = match log {
+        Some(path) => {
+            let (log, earlier) = LogFile::open(path).unwrap();
+            (Some(log), earlier)
+        }
+        None => (None, Vec::new()),
+    };
+    let mut live = Live::new(
         Journal::new(Params::default()),
         feed,
         Arc::new(clock_fn),
-        None,
+        log,
     );
+    live.resume(earlier);
     let harness = Harness::builder()
         .with_size(egui::vec2(400.0, 620.0))
         .build_ui_state(|ui, live: &mut Live| live.show(ui), live);
@@ -323,4 +339,64 @@ fn going_away_closes_the_row() {
     assert_eq!(h.state().current_session(), None);
     assert!(h.query_by_label("nothing in focus").is_some());
     assert!(h.query_by_label("09:00–09:10").is_some());
+}
+
+#[test]
+fn corrections_are_kept_across_a_restart() {
+    let dir = std::env::temp_dir().join(format!("timechopper-ui-{}", std::process::id()));
+    let path = dir.join("day.log");
+    let _ = std::fs::remove_dir_all(&dir);
+    let webmail = scenarios::ALL.iter().find(|s| s.name == "webmail").unwrap();
+    let spans = (webmail.spans)();
+    let end = spans.last().unwrap().end;
+
+    // A first run: the day happens, the user marks, names, takes mail out
+    // and confirms a row.
+    let (mut h, rig) = harness_logged(Some(&path), Time::hms(8, 0, 0));
+    rig.play(&spans);
+    h.run();
+    h.state_mut().mark(Mark::Note("report".into()));
+    let t = h.state().timeline().clone();
+    let report = t.sessions.iter().position(|s| s.members.len() > 1).unwrap();
+    let gmail = t.sessions[report]
+        .members
+        .iter()
+        .position(|m| !m.doubts.is_empty())
+        .unwrap();
+    h.state_mut().apply(t.name(report, "Q3 report"));
+    h.state_mut().apply(t.separate(report, gmail, Scope::Here));
+    let t = h.state().timeline().clone();
+    h.state_mut().apply(t.confirm(0)); // the earliest row
+    h.run();
+    let before = h.state().timeline().clone();
+    assert_eq!(h.state().journal().hints().len(), 3);
+    drop(h);
+
+    // Started again later the same day: everything is as it was.
+    let (mut h, _rig) = harness_logged(Some(&path), end);
+    h.run();
+    let after = h.state().timeline().clone();
+    assert!(before.diff(&after).is_empty(), "{:?}", before.diff(&after));
+    assert_eq!(after.marks.len(), 1);
+    assert_eq!(h.state().journal().hints().len(), 3);
+    assert!(
+        after
+            .tasks
+            .iter()
+            .any(|t| t.name.as_deref() == Some("Q3 report"))
+    );
+    assert!(h.query_by_label("confirmed").is_some());
+
+    // Undo still works on what was done before the restart, and is kept
+    // too.
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(h.state().journal().hints().len(), 2);
+    drop(h);
+    let (h, _rig) = harness_logged(Some(&path), end);
+    assert_eq!(h.state().journal().hints().len(), 2);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches(" @hint ").count(), 3);
+    assert_eq!(text.matches(" @unhint").count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
 }

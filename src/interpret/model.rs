@@ -128,6 +128,15 @@ pub enum Record {
         at: Time,
         mark: Time,
     },
+    /// At `at`, the user corrected the interpretation.
+    Hint {
+        at: Time,
+        hint: super::Hint,
+    },
+    /// At `at`, the user took back their latest correction still standing.
+    Unhint {
+        at: Time,
+    },
 }
 
 /// One window holding focus from `start` to `end`.
@@ -184,7 +193,9 @@ pub fn parse_log(text: &str) -> Result<Vec<Event>, String> {
 /// Parses a log with its markers. Besides focus changes, a line may be
 /// `HH:MM:SS @note TEXT`, `@break TEXT`, `@opened APP TITLE`,
 /// `@closed APP TITLE`, or `@unmark HH:MM:SS` (taking back the user's marker
-/// made at that time). Focus changes must be in time order.
+/// made at that time), `@hint FIELDS` (a correction, as
+/// [`super::Hint::encode`] writes it) or `@unhint` (the latest correction
+/// taken back). Focus changes must be in time order.
 pub fn parse_records(text: &str) -> Result<Vec<Record>, String> {
     let mut records = Vec::new();
     let mut events: Vec<Event> = Vec::new();
@@ -211,6 +222,18 @@ pub fn parse_records(text: &str) -> Result<Vec<Record>, String> {
             "@break" => Some(Mark::Break(title.to_string())),
             "@opened" => Some(Mark::Opened(window())),
             "@closed" => Some(Mark::Closed(window())),
+            "@hint" => {
+                // Fields are separated by tabs: take the rest of the line
+                // as it is.
+                let fields = rest.split_once(char::is_whitespace).map_or("", |(_, f)| f);
+                let hint = super::Hint::decode(fields).map_err(|e| err(&e))?;
+                records.push(Record::Hint { at, hint });
+                continue;
+            }
+            "@unhint" => {
+                records.push(Record::Unhint { at });
+                continue;
+            }
             "@unmark" => {
                 let mark = Time::parse(title).ok_or_else(|| err("bad time to unmark"))?;
                 records.push(Record::Unmark { at, mark });
@@ -262,6 +285,8 @@ pub fn record_line(record: &Record) -> String {
             Mark::Closed(w) => format!("{at} @closed {}\n", window(w)),
         },
         Record::Unmark { at, mark } => format!("{at} @unmark {mark}\n"),
+        Record::Hint { at, hint } => format!("{at} @hint {}\n", hint.encode()),
+        Record::Unhint { at } => format!("{at} @unhint\n"),
     }
 }
 
@@ -276,7 +301,7 @@ pub fn markers(records: &[Record]) -> Vec<Marker> {
                     out.remove(i);
                 }
             }
-            Record::Focus(_) => {}
+            _ => {}
         }
     }
     out.sort_by_key(|m| m.at);
@@ -373,6 +398,76 @@ mod tests {
         assert_eq!(left.len(), 3);
         assert!(left.iter().all(|m| m.at != Time(20)));
         assert!(parse_records("09:00:00 @frobnicate x").is_err());
+    }
+
+    #[test]
+    fn corrections_round_trip() {
+        use super::super::{Hint, Lens, Pattern};
+        let t = |s| Time::parse(s).unwrap();
+        let hints = [
+            Hint::Lens {
+                app: "Code.exe".into(),
+                lens: Lens::Title,
+            },
+            Hint::apart(Pattern::parse("firefox:inbox (3) - gmail").unwrap()),
+            Hint::Apart {
+                pattern: Pattern::parse(":weekly sync: notes").unwrap(),
+                during: vec![(t("09:00"), t("09:30:15")), (t("11:00"), t("11:05"))],
+            },
+            Hint::Together(
+                Pattern::parse("notepad").unwrap(),
+                Pattern::parse("firefox:quarterly report").unwrap(),
+            ),
+            Hint::Fixed {
+                name: Some("Q3 report".into()),
+                intervals: vec![(t("09:00"), t("09:24"))],
+            },
+            Hint::Fixed {
+                name: None,
+                intervals: vec![(t("10:00"), t("10:10"))],
+            },
+            Hint::Split { at: t("09:33:20") },
+            Hint::Join {
+                from: t("10:56"),
+                into: t("09:33:20"),
+            },
+            Hint::Name {
+                at: t("09:00"),
+                name: "Budget: Q3, second pass".into(),
+            },
+        ];
+        let mut records: Vec<Record> = hints
+            .iter()
+            .map(|hint| Record::Hint {
+                at: t("12:00"),
+                hint: hint.clone(),
+            })
+            .collect();
+        records.push(Record::Unhint { at: t("12:01") });
+        let text: String = records.iter().map(record_line).collect();
+        assert_eq!(parse_records(&text).unwrap(), records);
+        // Tabs and line breaks in a name don't break the line apart.
+        let odd = Hint::Name {
+            at: t("09:00"),
+            name: "a\tb\nc".into(),
+        };
+        let line = record_line(&Record::Hint {
+            at: t("12:00"),
+            hint: odd,
+        });
+        let back = parse_records(&line).unwrap();
+        let expected = Hint::Name {
+            at: t("09:00"),
+            name: "a b c".into(),
+        };
+        assert_eq!(
+            back,
+            [Record::Hint {
+                at: t("12:00"),
+                hint: expected
+            }]
+        );
+        assert!(parse_records("12:00:00 @hint split\tnoon").is_err());
     }
 
     #[test]

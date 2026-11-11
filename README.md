@@ -69,18 +69,17 @@ start anything. A marker is evidence of where one task may have ended:
 A cut a marker made can be undone like any other (*Join into…*).
 
 The window re-reads the whole day every second and on every focus change.
-Each focus change and marker is appended to a log file as it happens, by
-default
+Each focus change, marker and correction is appended to a log file as it
+happens, by default
 `%LOCALAPPDATA%\timechopper\YYYY-MM-DD.log` (`--log-file` to choose).
-Starting again on the same day carries on from it. Without keyboard or mouse
+Starting again on the same day carries on from it: the rows come back as
+you left them, and *Undo* still takes back what you did before the restart. Without keyboard or mouse
 input for 5 minutes (`--idle`), you are counted as away from when the input
 stopped. Clicking in the live window itself doesn't count as a focus change:
 the window you were in keeps the time.
 
 Not yet:
 
-- Corrections are not saved: closing the window loses them, though not
-  the log or the markers in it.
 - The day ends at midnight only by restarting: times are times of day.
 - There is no tray icon and no way to collapse the window to a single line.
 
@@ -110,7 +109,10 @@ when nothing is in use:
 
 Markers go between them: `HH:MM:SS @note TEXT`, `@break TEXT`,
 `@opened APP TITLE`, `@closed APP TITLE`, and `@unmark HH:MM:SS` (a note or
-break taken back). `timechopper demo marked-day` shows a day with notes and
+break taken back). So do corrections made in the live window:
+`@hint KIND<TAB>FIELDS…` (e.g. `@hint name<TAB>09:00:00<TAB>Q3 report`) and
+`@unhint` (the latest one taken back); `summarize` applies them, before any
+given on the command line. `timechopper demo marked-day` shows a day with notes and
 a break, and `demo marked-day --log` shows its log.
 
 Ten focus changes between Notepad, a browser and (once) Outlook come out as:

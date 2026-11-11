@@ -207,19 +207,53 @@ impl Live {
         self.refresh();
     }
 
-    /// Applies a correction now.
+    /// Applies a correction now. Like everything else, it is kept in the
+    /// log, so it still holds after a restart.
     pub fn apply(&mut self, hint: Hint) {
-        self.journal.apply(hint);
+        let at = self.clock.now().max(self.now);
+        self.observe(Record::Hint { at, hint });
         self.done.push(Done::Hint);
+        self.refresh();
+    }
+
+    /// Takes in what an earlier run of the window logged (from a log file
+    /// being continued), as if it had happened here: corrections and markers
+    /// made then can be undone now.
+    pub fn resume(&mut self, records: Vec<Record>) {
+        for record in records {
+            match &record {
+                Record::Mark(m) if m.mark.by_user() => self.done.push(Done::Mark(m.at)),
+                Record::Unmark { mark, .. } => {
+                    let taken = self
+                        .done
+                        .iter()
+                        .rposition(|d| matches!(d, Done::Mark(t) if t == mark));
+                    if let Some(i) = taken {
+                        self.done.remove(i);
+                    }
+                }
+                Record::Hint { .. } => self.done.push(Done::Hint),
+                Record::Unhint { .. } => {
+                    if let Some(i) = self.done.iter().rposition(|d| matches!(d, Done::Hint)) {
+                        self.done.remove(i);
+                    }
+                }
+                Record::Focus(event) => self.current = Some(event.clone()),
+                Record::Mark(_) => {}
+            }
+            self.journal.record(record);
+        }
         self.stale = true;
         self.refresh();
+        self.flashes.clear();
     }
 
     /// Takes back the latest correction or marker.
     pub fn undo(&mut self) {
         match self.done.pop() {
             Some(Done::Hint) => {
-                self.journal.undo();
+                let at = self.clock.now().max(self.now);
+                self.observe(Record::Unhint { at });
             }
             Some(Done::Mark(mark)) => {
                 let at = self.clock.now().max(self.now);

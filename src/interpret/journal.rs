@@ -79,6 +79,10 @@ impl Journal {
             Record::Unmark { mark, .. } => {
                 self.unmark(mark);
             }
+            Record::Hint { hint, .. } => self.apply(hint),
+            Record::Unhint { .. } => {
+                self.undo();
+            }
         }
     }
 

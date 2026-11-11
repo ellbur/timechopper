@@ -119,7 +119,7 @@ pub fn at(record: &Record) -> Time {
     match record {
         Record::Focus(e) => e.at,
         Record::Mark(m) => m.at,
-        Record::Unmark { at, .. } => *at,
+        Record::Unmark { at, .. } | Record::Hint { at, .. } | Record::Unhint { at } => *at,
     }
 }
 

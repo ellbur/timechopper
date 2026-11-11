@@ -80,6 +80,100 @@ pub enum Hint {
 }
 
 impl Hint {
+    /// The hint as one line of text, for keeping in a log: a keyword and
+    /// fields separated by tabs (free text has its tabs and line breaks
+    /// turned to spaces). [`Hint::decode`] reads it back.
+    pub fn encode(&self) -> String {
+        let clean = |t: &str| t.replace(['\t', '\r', '\n'], " ");
+        let ranges = |rs: &[(Time, Time)]| {
+            let parts: Vec<String> = rs.iter().map(|(a, b)| format!("{a}-{b}")).collect();
+            match parts.is_empty() {
+                true => "-".to_string(),
+                false => parts.join(","),
+            }
+        };
+        let fields: Vec<String> = match self {
+            Hint::Lens { app, lens } => {
+                let lens = match lens {
+                    Lens::Auto => "auto",
+                    Lens::App => "app",
+                    Lens::Title => "title",
+                };
+                vec!["lens".into(), clean(app), lens.into()]
+            }
+            Hint::Apart { pattern, during } => {
+                vec!["apart".into(), ranges(during), clean(&pattern.to_string())]
+            }
+            Hint::Together(a, b) => vec![
+                "together".into(),
+                clean(&a.to_string()),
+                clean(&b.to_string()),
+            ],
+            Hint::Fixed { name, intervals } => vec![
+                "fixed".into(),
+                ranges(intervals),
+                clean(name.as_deref().unwrap_or("")),
+            ],
+            Hint::Split { at } => vec!["split".into(), at.to_string()],
+            Hint::Join { from, into } => vec!["join".into(), from.to_string(), into.to_string()],
+            Hint::Name { at, name } => vec!["name".into(), at.to_string(), clean(name)],
+        };
+        fields.join("\t")
+    }
+
+    /// Reads a hint written by [`Hint::encode`].
+    pub fn decode(text: &str) -> Result<Hint, String> {
+        let fields: Vec<&str> = text.split('\t').collect();
+        let err = || format!("bad correction: {text}");
+        let time = |t: &str| Time::parse(t).ok_or_else(err);
+        let ranges = |t: &str| -> Result<Vec<(Time, Time)>, String> {
+            if t == "-" {
+                return Ok(Vec::new());
+            }
+            t.split(',')
+                .map(|r| {
+                    let (a, b) = r.split_once('-').ok_or_else(err)?;
+                    Ok((time(a)?, time(b)?))
+                })
+                .collect()
+        };
+        Ok(match fields[..] {
+            ["lens", app, lens] => Hint::Lens {
+                app: app.to_string(),
+                lens: match lens {
+                    "auto" => Lens::Auto,
+                    "app" => Lens::App,
+                    "title" => Lens::Title,
+                    _ => return Err(err()),
+                },
+            },
+            ["apart", during, pattern] => Hint::Apart {
+                pattern: Pattern::parse(pattern)?,
+                during: ranges(during)?,
+            },
+            ["together", a, b] => Hint::Together(Pattern::parse(a)?, Pattern::parse(b)?),
+            // An empty name at the end of a line may have been trimmed off.
+            ["fixed", intervals] => Hint::Fixed {
+                name: None,
+                intervals: ranges(intervals)?,
+            },
+            ["fixed", intervals, name] => Hint::Fixed {
+                name: (!name.is_empty()).then(|| name.to_string()),
+                intervals: ranges(intervals)?,
+            },
+            ["split", at] => Hint::Split { at: time(at)? },
+            ["join", from, into] => Hint::Join {
+                from: time(from)?,
+                into: time(into)?,
+            },
+            ["name", at, name] => Hint::Name {
+                at: time(at)?,
+                name: name.to_string(),
+            },
+            _ => return Err(err()),
+        })
+    }
+
     /// These windows are always a task of their own.
     pub fn apart(pattern: Pattern) -> Hint {
         Hint::Apart {
