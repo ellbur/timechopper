@@ -57,6 +57,10 @@ jobs:
         shell: pwsh
         run: ./ci/smoke-calculator.ps1
 
+      - name: Smoke test (live window)
+        shell: pwsh
+        run: ./ci/smoke-ui.ps1
+
       - name: Upload screen recordings
         if: always()
         uses: actions/upload-artifact@v4

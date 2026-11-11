@@ -23,7 +23,9 @@ New-Item -ItemType Directory -Force $VideoDir | Out-Null
 function Wait-Window([string]$cls, [string]$title, [int]$timeoutSec = 20) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     do {
-        $h = [Win]::FindWindow($cls, $title)
+        # An empty class means any class (PowerShell would pass "", not null).
+        $c = if ($cls) { $cls } else { [NullString]::Value }
+        $h = [Win]::FindWindow($c, $title)
         if ($h -ne [IntPtr]::Zero) { return $h }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)

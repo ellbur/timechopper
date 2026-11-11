@@ -232,7 +232,7 @@ impl Session {
 }
 
 /// An interpretation of a focus log.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Timeline {
     /// The log, with spans cut in two wherever a hint draws a line through
     /// one.

@@ -65,6 +65,12 @@ impl Journal {
         }
     }
 
+    /// The time of the latest observation, if there has been one.
+    pub fn latest(&self) -> Option<Time> {
+        let last = self.spans.last().map(|s| s.end);
+        last.max(self.open.as_ref().map(|(at, _)| *at))
+    }
+
     /// The log up to `now`, including the window in focus at that moment.
     pub fn spans(&self, now: Time) -> Vec<Span> {
         let mut log = self.clone();
@@ -155,7 +161,7 @@ impl Timeline {
 
     /// The start of the session's first time in focus: a moment that
     /// identifies the session whatever else changes around it.
-    fn anchor(&self, session: usize) -> Time {
+    pub fn anchor(&self, session: usize) -> Time {
         self.spans[self.sessions[session].spans[0]].start
     }
 

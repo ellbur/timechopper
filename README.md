@@ -4,16 +4,67 @@ A helper for time tracking: it notices which window you are using, so that
 when you forget to write down that you switched tasks, you can go back and
 work out when you did and what you were doing.
 
-It has two parts:
+It has three parts:
 
-- a **watcher** (Windows) that reports the focused window every time it
-  changes, and
+- a **watcher** (Windows) that notices every time the focused window
+  changes,
 - an **interpretation** (any platform) that boils a log of those changes
-  down to a short list of tasks.
+  down to a short list of tasks, and
+- a **live window** that connects the two: a small panel in the corner of
+  the screen showing the day so far, grouped into tasks, up to the window in
+  focus now, where the grouping can be corrected as you go.
 
-They are not connected yet: the watcher prints, and the interpretation has
-only been tried on synthetic logs. There is no UI; the interpretation has
-the calls one would need.
+## The live window
+
+```
+timechopper ui                                  # Windows: watch, and show the day so far
+timechopper ui --replay messy-day --speed 120   # any platform: replay a synthetic day
+```
+
+It opens a 400×620 window that stays on top, in the bottom right corner of
+the screen. From the top:
+
+- **Now**: the clock, the window in focus, and the row it is part of, with
+  how long that has gone on (and the task's total for the day). Type what
+  you are starting and press *New task* (or just press it) to say "from
+  now on this is something else". The current task is cut at that second
+  and the earlier rows are left alone. *Undo* takes back the last
+  correction; hover over it to see which one that is.
+- **Rows**: newest first, each with its time, the time actually spent on it
+  and what it seems to be about. Carve-outs are indented under the row they
+  interrupted. A row that just changed shape (a window joined it, or a
+  correction moved it) flashes; the row in focus has an outline; `? 2`
+  means two things in it may not belong. Click a row to open it:
+  - each thing swept into it, with its time and visits (hover for why it
+    is there); `?` marks the doubtful ones, and *own task…* takes one out,
+    *just here* or *wherever it shows up*;
+  - possible splits, each with *split here*;
+  - *Name…*, *Confirm* (keep the row exactly as it is), *Join into…*
+    another row's task, and *Split* at a time typed in.
+
+  Hovering over any of these outlines in red the rows it would change.
+- **Focus changes**: the log itself, newest first, each entry marked with the
+  colour of the task it went to. Click one to open its row.
+
+The window re-reads the whole day every second and on every focus change.
+Each focus change is appended to a log file as it happens, by default
+`%LOCALAPPDATA%\timechopper\YYYY-MM-DD.log` (`--log-file` to choose).
+Starting again on the same day carries on from it. Without keyboard or mouse
+input for 5 minutes (`--idle`), you are counted as away from when the input
+stopped. Clicking in the live window itself doesn't count as a focus change:
+the window you were in keeps the time.
+
+Not yet:
+
+- Corrections are not saved: closing the window loses them, though not
+  the log.
+- The day ends at midnight only by restarting: times are times of day.
+- There is no tray icon and no way to collapse the window to a single line.
+
+The code is in `src/ui.rs` (the window), `src/live.rs` (clock, replay, log
+file) and `src/win.rs` (`follow`: the watcher feeding the window).
+`tests/ui.rs` drives the window headlessly: focus changes arrive and buttons
+are clicked through the accessibility tree.
 
 ## Interpreting a focus log
 
@@ -125,8 +176,8 @@ the result and change nothing but the rows they are aimed at.
 
 ### For a UI
 
-There is no UI yet, but the calls one would make exist
-(`src/interpret/journal.rs`), with the log allowed to be still in progress:
+The live window is built on these calls (`src/interpret/journal.rs`), which
+allow the log to be still in progress:
 
 - `Journal::observe(at, window)` on every focus change;
   `Journal::timeline(now)` interprets everything up to the present moment,
@@ -154,8 +205,9 @@ There is no UI yet, but the calls one would make exist
   same flag applies.
 - A change of project is only offered as a possible split, not made, when
   more time goes into a shared app than into the projects themselves.
-- Time away from the computer is only known if the log says so (`-`); the
-  watcher does not detect idleness.
+- Time away from the computer is only known if the log says so (`-`). The
+  live window writes that after 5 minutes without input; the plain watcher
+  does not.
 - Standing rules ("mail is always its own task") are not kept between logs.
 
 The code is in `src/interpret/`; `tests/interpret.rs` and `tests/editing.rs`

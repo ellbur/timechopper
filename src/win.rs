@@ -1,21 +1,26 @@
 //! Windows implementation: a WinEvent hook on foreground changes plus
 //! queries for the window's title/class and the owning process's details.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
+use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, LPARAM, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
     STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
 };
-use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND,
     EnumChildWindows, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowTextLengthW,
@@ -24,7 +29,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PWSTR};
 
-use crate::Options;
+use timechopper::interpret::{Time, Window};
+use timechopper::live::{Clock, FnClock, Observation};
+
+use crate::{Feed, Options, UiOptions};
 
 /// `ProcessCommandLineInformation` (Windows 8.1+). Not exported by name.
 const PROCESS_COMMAND_LINE_INFORMATION: PROCESSINFOCLASS = PROCESSINFOCLASS(60);
@@ -40,7 +48,47 @@ pub fn run(opts: Options) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     report("focused", fg);
+    pump(opts.exit_after, None)
+}
 
+/// Watches on a thread of its own, sending each focus change (and each time
+/// the user goes away or comes back) to the live window.
+pub fn follow(opts: &UiOptions, wake: Box<dyn Fn() + Send>) -> Result<Feed, String> {
+    let path = match &opts.log_file {
+        Some(path) => path.clone(),
+        None => {
+            let dir = std::env::var_os("LOCALAPPDATA")
+                .ok_or("LOCALAPPDATA is not set; give --log-file")?;
+            let t = unsafe { GetLocalTime() };
+            let name = format!("{:04}-{:02}-{:02}.log", t.wYear, t.wMonth, t.wDay);
+            PathBuf::from(dir).join("timechopper").join(name)
+        }
+    };
+    let (send, receive) = mpsc::channel();
+    let idle = opts.idle;
+    std::thread::spawn(move || {
+        SINK.with(|s| *s.borrow_mut() = Some(Sink { send, wake }));
+        report("focused", unsafe { GetForegroundWindow() });
+        pump(None, Some(idle));
+    });
+    let clock: Arc<dyn Clock> = Arc::new(FnClock(|| time_of_day(&unsafe { GetLocalTime() })));
+    Ok((clock, receive, path))
+}
+
+/// Where observations go instead of being printed, on a thread that feeds
+/// the live window.
+struct Sink {
+    send: Sender<Observation>,
+    wake: Box<dyn Fn() + Send>,
+}
+
+fn time_of_day(t: &SYSTEMTIME) -> Time {
+    Time::hms(t.wHour.into(), t.wMinute.into(), t.wSecond.into())
+}
+
+/// Hooks focus and title changes and pumps messages until `exit_after` (if
+/// given), checking every second whether the user has been away for `idle`.
+fn pump(exit_after: Option<Duration>, idle: Option<Duration>) -> ExitCode {
     unsafe {
         let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
         let fg_hook = SetWinEventHook(
@@ -66,11 +114,12 @@ pub fn run(opts: Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
 
-        let exit_timer = opts.exit_after.map(|d| {
+        let exit_timer = exit_after.map(|d| {
             let ms = d.as_millis().clamp(1, u32::MAX as u128) as u32;
             SetTimer(None, 0, ms, None)
         });
         let retry_timer = SetTimer(None, 0, UWP_RETRY_INTERVAL_MS, None);
+        let idle_timer = idle.map(|_| SetTimer(None, 0, 1000, None));
 
         // WinEvent callbacks for out-of-context hooks are delivered while
         // this thread pumps messages.
@@ -84,6 +133,12 @@ pub fn run(opts: Options) -> ExitCode {
                     retry_pending();
                     continue;
                 }
+                if let (Some(timer), Some(idle)) = (idle_timer, idle)
+                    && msg.wParam.0 == timer
+                {
+                    check_idle(idle);
+                    continue;
+                }
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -94,6 +149,9 @@ pub fn run(opts: Options) -> ExitCode {
             let _ = KillTimer(None, t);
         }
         let _ = KillTimer(None, retry_timer);
+        if let Some(t) = idle_timer {
+            let _ = KillTimer(None, t);
+        }
         let _ = UnhookWinEvent(fg_hook);
         if !name_hook.is_invalid() {
             let _ = UnhookWinEvent(name_hook);
@@ -105,7 +163,7 @@ pub fn run(opts: Options) -> ExitCode {
 /// A UWP frame whose app window hasn't been attached yet (this happens for a
 /// moment after an app starts or is restored). Reporting waits for it.
 struct Pending {
-    stamp: String,
+    stamp: SYSTEMTIME,
     what: String,
     hwnd: HWND,
     deadline: Instant,
@@ -115,6 +173,91 @@ thread_local! {
     /// The last (hwnd, title) reported, to avoid repeating identical reports.
     static LAST: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
+    static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    /// Whether the user is away (no input for a while) as far as the live
+    /// window has been told.
+    static AWAY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Tells the live window the user has gone away, or come back, when the
+/// time since the last keyboard or mouse input crosses `idle`.
+fn check_idle(idle: Duration) {
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+        return;
+    }
+    let quiet = Duration::from_millis(unsafe { GetTickCount() }.wrapping_sub(info.dwTime).into());
+    match (AWAY.get(), quiet >= idle) {
+        (false, true) => {
+            flush_pending();
+            AWAY.set(true);
+            // Away since the last input, not since we noticed.
+            let now = time_of_day(&unsafe { GetLocalTime() });
+            let at = Time(now.0.saturating_sub(quiet.as_secs()));
+            send(Observation { at, window: None });
+            LAST.with(|l| *l.borrow_mut() = None);
+        }
+        (true, false) => {
+            AWAY.set(false);
+            report("back", unsafe { GetForegroundWindow() });
+        }
+        _ => {}
+    }
+}
+
+/// Sends an observation to the live window, if this thread feeds one.
+/// Returns whether it did.
+fn send(observation: Observation) -> bool {
+    SINK.with(|s| match s.borrow().as_ref() {
+        Some(sink) => {
+            let _ = sink.send.send(observation);
+            (sink.wake)();
+            true
+        }
+        None => false,
+    })
+}
+
+/// Reports focus on `hwnd` (or on nothing): to the live window, or printed.
+fn emit(stamp: &SYSTEMTIME, what: &str, hwnd: HWND) {
+    if SINK.with(|s| s.borrow().is_some()) {
+        // While away, focus moving by itself is not the user's doing.
+        if !AWAY.get() {
+            let window = (!hwnd.is_invalid()).then(|| window_of(hwnd));
+            send(Observation {
+                at: time_of_day(stamp),
+                window,
+            });
+        }
+        return;
+    }
+    let stamp = format_stamp(stamp);
+    match hwnd.is_invalid() {
+        true => println!("[{stamp}] {what}: (no foreground window)\n"),
+        false => println!("{}", describe(&stamp, what, hwnd)),
+    }
+}
+
+/// The app (executable file name) and title of a window, as the
+/// interpretation sees it.
+fn window_of(hwnd: HWND) -> Window {
+    let mut pid = window_pid_tid(hwnd).0;
+    if is_uwp_frame(hwnd)
+        && let Some(app) = uwp_app_pid(hwnd)
+    {
+        pid = app;
+    }
+    let app = match process_image(pid) {
+        Ok(path) => path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string(),
+        Err(_) => "unknown".to_string(),
+    };
+    Window {
+        app,
+        title: window_title(hwnd),
+    }
 }
 
 unsafe extern "system" fn on_event(
@@ -142,7 +285,7 @@ fn report(what: &str, hwnd: HWND) {
     let stamp = timestamp();
     if hwnd.is_invalid() {
         flush_pending();
-        println!("[{stamp}] {what}: (no foreground window)\n");
+        emit(&stamp, what, hwnd);
         return;
     }
     let key = (hwnd.0 as isize, window_title(hwnd));
@@ -167,7 +310,7 @@ fn report(what: &str, hwnd: HWND) {
         });
         return;
     }
-    println!("{}", describe(&stamp, what, hwnd));
+    emit(&stamp, what, hwnd);
 }
 
 fn retry_pending() {
@@ -183,14 +326,14 @@ fn retry_pending() {
 
 fn flush_pending() {
     if let Some(p) = PENDING.with(|p| p.borrow_mut().take()) {
-        println!("{}", describe(&p.stamp, &p.what, p.hwnd));
+        emit(&p.stamp, &p.what, p.hwnd);
     }
 }
 
 /// `--once`: report the current window, waiting briefly if it is a UWP frame
 /// whose app window isn't attached yet.
 fn report_once(hwnd: HWND) {
-    let stamp = timestamp();
+    let stamp = format_stamp(&timestamp());
     if hwnd.is_invalid() {
         println!("[{stamp}] focused: (no foreground window)\n");
         return;
@@ -256,8 +399,11 @@ fn file_name_is(path: &str, name: &str) -> bool {
         .is_some_and(|f| f.eq_ignore_ascii_case(name))
 }
 
-fn timestamp() -> String {
-    let t = unsafe { GetLocalTime() };
+fn timestamp() -> SYSTEMTIME {
+    unsafe { GetLocalTime() }
+}
+
+fn format_stamp(t: &SYSTEMTIME) -> String {
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
