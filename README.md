@@ -1,7 +1,6 @@
 # timechopper
 
-> **Proof of concept.** This is an experiment, not finished software: expect
-> rough edges, changing behaviour and log formats, and no support.
+> **Proof of concept.** This is an experiment, not finished software. It is not intended or suitable for production use.
 
 timechopper helps you keep track of your time. It watches which window you
 are using on Windows and groups the day into tasks in a small always-on-top
