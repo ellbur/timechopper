@@ -39,7 +39,11 @@ cargo run -- --once                             # Windows: print the focused win
 
 ## Screenshots in the README
 
-`docs/images/*.png` were taken on Linux under Xvfb from
-`timechopper ui --replay messy-day --speed 120`, cropped to the 400×620
-window (`import -window root`, then `convert -crop`). This needs
-`libxkbcommon-x11-0` installed; `xdotool` can click a row open first.
+`docs/images/*.png` were taken on Linux under Xvfb (1280×800) with openbox
+as the window manager, a full-size `xterm` running `less docs/design.md` as
+the work behind, and `timechopper ui --replay messy-day --speed 120` in the
+bottom right corner. The shot is `import -window root`, then
+`convert -crop 720x720+560+80`, so some of the desktop shows around the
+panel. This needs `libxkbcommon-x11-0`, `openbox`, `xterm` and
+`x11-xserver-utils` (`xsetroot -solid '#3b6e8f'`) installed; for the opened
+row, `xdotool` clicks the 09:06 row about 52 s into the replay.
