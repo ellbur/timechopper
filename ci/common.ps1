@@ -12,6 +12,7 @@ public static class Win {
   [DllImport("user32.dll")]
   public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 }
 '@
 
@@ -36,12 +37,23 @@ function Set-WindowHalf([IntPtr]$hwnd, [ValidateSet('Left', 'Right')]$side) {
     [Win]::MoveWindow($hwnd, $x, 0, [int]($sw / 2), $sh - 40, $true) | Out-Null
 }
 
-# Background processes can't always take focus; try both ways.
+# Windows refuses SetForegroundWindow from a background process once
+# something else holds the foreground. A synthetic Alt key press counts as
+# input to this process and lifts that lock; retry until focus moves.
 function Set-Foreground([IntPtr]$hwnd, $activateArg) {
-    (New-Object -ComObject WScript.Shell).AppActivate($activateArg) | Out-Null
-    [Win]::SetForegroundWindow($hwnd) | Out-Null
-    Start-Sleep -Seconds 2
-    Write-Host "target hwnd: $hwnd, foreground now: $([Win]::GetForegroundWindow())"
+    for ($i = 1; $i -le 5; $i++) {
+        [Win]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
+        [Win]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
+        (New-Object -ComObject WScript.Shell).AppActivate($activateArg) | Out-Null
+        [Win]::SetForegroundWindow($hwnd) | Out-Null
+        Start-Sleep -Milliseconds 500
+        if ([Win]::GetForegroundWindow() -eq $hwnd) {
+            Write-Host "focused $hwnd (attempt $i)"
+            Start-Sleep -Seconds 2   # time for the watcher (and the video) to show it
+            return
+        }
+    }
+    throw "could not move focus to $hwnd (foreground is $([Win]::GetForegroundWindow()))"
 }
 
 # --- Screen recording (ffmpeg gdigrab) ---
@@ -74,7 +86,12 @@ function Stop-Recording($rec) {
         ffmpeg -hide_banner -loglevel error -y -i $mp4 `
             -vf 'fps=1/2,scale=640:-2,tile=3x3' -frames:v 1 `
             (Join-Path $VideoDir "$($rec.Name)-frames.png")
-        Write-Host "recorded $mp4"
+        # Average brightness per second, as a sanity check that the capture
+        # isn't black (YAVG near 16 means a blank frame).
+        $yavg = ffmpeg -hide_banner -loglevel error -i $mp4 `
+            -vf 'fps=1,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-' -f null - |
+            Select-String 'YAVG=([\d.]+)' | ForEach-Object { [math]::Round([double]$_.Matches[0].Groups[1].Value) }
+        Write-Host "recorded $mp4 ($((Get-Item $mp4).Length) bytes); brightness per second: $($yavg -join ' ')"
     }
 }
 
