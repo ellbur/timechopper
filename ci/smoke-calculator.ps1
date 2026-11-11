@@ -7,30 +7,36 @@ $pkg = Get-AppxPackage Microsoft.WindowsCalculator
 if (-not $pkg) {
     Write-Host 'Calculator not installed; installing from the Microsoft Store via winget'
     winget install --id 9WZDNCRFHVN5 --source msstore --exact --silent `
-        --accept-package-agreements --accept-source-agreements --disable-interactivity
+        --accept-package-agreements --accept-source-agreements --disable-interactivity |
+        Select-Object -Last 3
     $pkg = Get-AppxPackage Microsoft.WindowsCalculator
     if (-not $pkg) { throw 'Calculator could not be installed' }
 }
 Write-Host "Calculator package: $($pkg.PackageFullName)"
 
-$w = Start-Watcher 30
-explorer.exe "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+$rec = $null; $w = $null
+try {
+    $rec = Start-Recording 'calculator'
+    $w = Start-Watcher 25
+    explorer.exe "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+    $hwnd = Wait-Window 'ApplicationFrameWindow' 'Calculator' 30
+    Start-Sleep -Seconds 2
+    Set-WindowHalf $hwnd 'Right'
+    Set-Foreground $hwnd 'Calculator'
+    Set-Foreground $w.Hwnd $w.Title
+    Set-Foreground $hwnd 'Calculator'
 
-$hwnd = [IntPtr]::Zero
-for ($i = 0; $i -lt 40 -and $hwnd -eq [IntPtr]::Zero; $i++) {
-    Start-Sleep -Milliseconds 500
-    $hwnd = [Win]::FindWindow('ApplicationFrameWindow', 'Calculator')
+    Write-Host '--- --once while Calculator is focused ---'
+    $once = (& $Exe --once | Out-String)
+    Write-Host $once
+
+    $out = Wait-Watcher $w
 }
-if ($hwnd -eq [IntPtr]::Zero) { throw 'Calculator window did not appear' }
-Start-Sleep -Seconds 2
-Set-Foreground $hwnd 'Calculator'
-
-Write-Host '--- --once while Calculator is focused ---'
-$once = (& $Exe --once | Out-String)
-Write-Host $once
-
-$out = Stop-Watcher $w
-Get-Process CalculatorApp, Calculator -ErrorAction SilentlyContinue | Stop-Process -Force
+finally {
+    Stop-Recording $rec
+    Close-Watcher $w
+    Get-Process CalculatorApp, Calculator -ErrorAction SilentlyContinue | Stop-Process -Force
+}
 
 Assert-Match $out 'class:\s+ApplicationFrameWindow' 'the UWP frame window'
 Assert-Match $out '(?i)host:\s+pid \d+, [^\r\n]*\\ApplicationFrameHost\.exe' 'ApplicationFrameHost as host'

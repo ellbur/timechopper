@@ -29,6 +29,11 @@ jobs:
       - name: Run --once
         run: ./target/release/timechopper.exe --once
 
+      - name: Install ffmpeg (screen recording)
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+          ffmpeg -version | Select-Object -First 1
+
       - name: Smoke test (Notepad)
         shell: pwsh
         run: ./ci/smoke-notepad.ps1
@@ -36,6 +41,14 @@ jobs:
       - name: Smoke test (Calculator, UWP)
         shell: pwsh
         run: ./ci/smoke-calculator.ps1
+
+      - name: Upload screen recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-recordings
+          path: ${{ runner.temp }}/videos/
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
