@@ -88,6 +88,43 @@ file) and `src/win.rs` (`follow`: the watcher feeding the window).
 `tests/ui.rs` drives the window headlessly: focus changes arrive and buttons
 are clicked through the accessibility tree.
 
+### Parts of a task
+
+Some clients want to know how the time on one task was spent: so much
+drafting the brief, so much research for it. Drafting and research
+alternate all day, so as rows they would be dozens of snippets each.
+Instead, a task can be divided into **parts**: shares of its time, by which
+windows were in use, wherever that time fell. The rows stay as they are;
+under each one a line gives its time in each part, and the totals give the
+task's:
+
+```
+09:48-11:29   1h41m  "Smith v. Jones brief": ...  (part 2 of 2, 37 visits)
+                   = Drafting 1h14m · Research 26m59s
+...
+   2h09m  "Smith v. Jones brief": ...
+   1h14m    Drafting
+  54m59s    Research
+```
+
+Open a row to:
+
+- **Divide by app**: one part per app (Word, the browser). Click a part's
+  name to rename it ("Drafting", "Research"). Each thing in the row has a
+  menu with the part it counts towards: move it to another part, or to a
+  part of its own. Anything left out of every part counts as "other".
+- **Combine with…** another row's task, when the guess made two tasks of
+  what you count as one (research in the morning, drafting after lunch):
+  one task, each keeping its time as a part.
+- **Undivide** to put it back.
+
+Parts always add up to the task's time. A division is one correction (`@hint
+parts…` in the log), so *Undo* takes back a whole step. A task you divided
+the same way on earlier days is offered that division ("? divided into
+Drafting, Research on Mon"), and divided without asking after three days in
+a row, like names (see below). `timechopper demo brief` is the example above;
+`--combine` and `--parts` do the same from the command line.
+
 ### What earlier days teach
 
 Corrections are made at times of day, which mean nothing the next day, but
@@ -100,6 +137,7 @@ corrections, and learns two kinds of rule:
   the same thing another day is probably called the same.
 - **Separations.** Something you took out of a row (*own task…*) is a thing
   of its own, done on the side: mail, chat.
+- **Divisions.** A task you divided into parts is divided the same way.
 
 A rule from earlier days is evidence, not an order:
 

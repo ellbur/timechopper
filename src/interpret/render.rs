@@ -2,7 +2,7 @@
 
 use super::history::days;
 use super::model::fmt_duration;
-use super::{Doubt, Label, Member, Timeline, Why};
+use super::{Doubt, Label, Member, Part, Timeline, Why};
 
 /// How much to say about what each row is made of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,6 +24,15 @@ fn describe(name: Option<&String>, label: &Label) -> String {
         Some(name) => format!("\"{name}\": {about}"),
         None => about,
     }
+}
+
+/// `Drafting 1h12m · Research 38m`.
+fn parts(parts: &[Part]) -> String {
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|p| format!("{} {}", p.name, fmt_duration(p.secs)))
+        .collect();
+    parts.join(" · ")
 }
 
 fn doubts(member: &Member) -> Vec<String> {
@@ -49,7 +58,8 @@ fn doubts(member: &Member) -> Vec<String> {
 /// on it. A session carved out of another is indented under it; its time is
 /// not part of the outer session's. Lines starting with `?` point at what
 /// the guess is least sure of; lines starting with `>` are what the user
-/// marked along the way.
+/// marked along the way; a line starting with `=` gives the row's time in
+/// each part of its task, if the task is divided.
 pub fn render(timeline: &Timeline, detail: Detail) -> String {
     let mut out = String::new();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); timeline.sessions.len()];
@@ -107,6 +117,9 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
         let mut line = |marker: char, text: String| {
             out.push_str(&format!("{indent}{:19}{marker} {text}\n", ""));
         };
+        if !session.parts.is_empty() {
+            line('=', parts(&session.parts));
+        }
         // The user's own markers: what they said at the time.
         if let Some(k) = session.opened_by {
             let m = &timeline.marks[k];
@@ -146,6 +159,9 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
                 member.name,
                 fmt_duration(member.secs)
             );
+            if let (false, Some(part)) = (session.parts.is_empty(), &member.part) {
+                text.push_str(&format!("  ({part})"));
+            }
             if !doubts.is_empty() {
                 text.push_str(&format!("  - {}", doubts.join("; ")));
             }
@@ -173,6 +189,13 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
             fmt_duration(task.active),
             describe(task.name.as_ref(), &task.label)
         ));
+        for part in &task.parts {
+            out.push_str(&format!(
+                "  {:>6}    {}\n",
+                fmt_duration(part.secs),
+                part.name
+            ));
+        }
     }
     out.push_str(&format!(
         "  {:>6}  tracked\n",

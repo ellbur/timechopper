@@ -312,7 +312,22 @@ fn every_second_is_counted_once() {
         let spans = script.finish();
         let mut hints = Vec::new();
         for _ in 0..dice.below(6) {
-            hints.push(match dice.below(8) {
+            hints.push(match dice.below(11) {
+                8 => Hint::Combine {
+                    from: dice.moment(),
+                    into: dice.moment(),
+                },
+                9 => Hint::Parts {
+                    at: dice.moment(),
+                    parts: vec![
+                        (Pattern::app(dice.pick(&apps)), "p".into()),
+                        (Pattern::title("a"), dice.pick(&["q", "p"]).to_string()),
+                    ],
+                },
+                10 => Hint::Parts {
+                    at: dice.moment(),
+                    parts: Vec::new(),
+                },
                 0 => Hint::apart(Pattern::app(dice.pick(&apps))),
                 1 => Hint::Apart {
                     pattern: Pattern::title("b"),

@@ -60,6 +60,19 @@ pub fn check(log: &[Span], timeline: &Timeline) {
         assert!(sessions.clone().all(|s| s.task == t));
         // A task's own sessions follow one another, unless the user fixed
         // one of them in place.
+        // Parts, if any, add up to the time of the task and of each row.
+        if !task.parts.is_empty() {
+            assert_eq!(task.parts.iter().map(|p| p.secs).sum::<u64>(), task.active);
+        }
+        for session in sessions.clone() {
+            if !session.parts.is_empty() {
+                assert_eq!(
+                    session.parts.iter().map(|p| p.secs).sum::<u64>(),
+                    session.active
+                );
+            }
+            assert_eq!(session.parts.is_empty(), task.parts.is_empty());
+        }
         let guessed = sessions.filter(|s| !s.confirmed);
         assert!(
             guessed

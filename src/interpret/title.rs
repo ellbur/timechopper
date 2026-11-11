@@ -295,6 +295,14 @@ impl Pattern {
         }
     }
 
+    /// The windows of an activity: its app, and its subject in the title.
+    pub fn of(activity: &Activity) -> Pattern {
+        Pattern {
+            app: Some(activity.app.clone()),
+            title: activity.subject.as_ref().map(|s| s.to_lowercase()),
+        }
+    }
+
     /// `APP`, `APP:TEXT` or `:TEXT`.
     pub fn parse(text: &str) -> Result<Pattern, String> {
         let (app, title) = text.split_once(':').unwrap_or((text, ""));

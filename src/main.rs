@@ -66,6 +66,12 @@ To correct the guess:
   --join <TIME> <TIME>            The row in focus at the first TIME belongs
                                   to the task in focus at the second
   --name <TIME> <NAME>            What to call the task in focus at TIME
+  --combine <TIME> <TIME>         The task in focus at the first TIME is a
+                                  part of the task in focus at the second
+  --parts <TIME> <PATTERN>=<NAME>[;<PATTERN>=<NAME>...]
+                                  Divide the task in focus at TIME into
+                                  parts: time on windows matching a PATTERN
+                                  counts towards its part ('' undivides)
 A PATTERN is APP, APP:TEXT or :TEXT, where TEXT is part of a window title.
 A TIME is HH:MM or HH:MM:SS.
 ";
@@ -165,6 +171,23 @@ impl Reading {
                 let from = time(&value("two times")?)?;
                 let into = time(&value("two times")?)?;
                 self.hints.push(Hint::Join { from, into });
+            }
+            "--combine" => {
+                let from = time(&value("two times")?)?;
+                let into = time(&value("two times")?)?;
+                self.hints.push(Hint::Combine { from, into });
+            }
+            "--parts" => {
+                let at = time(&value("a time and parts")?)?;
+                let spec = value("a time and parts")?;
+                let mut parts = Vec::new();
+                for item in spec.split(';').filter(|i| !i.trim().is_empty()) {
+                    let (pattern, name) = item
+                        .split_once('=')
+                        .ok_or(format!("expected PATTERN=NAME: {item}"))?;
+                    parts.push((Pattern::parse(pattern.trim())?, name.trim().to_string()));
+                }
+                self.hints.push(Hint::Parts { at, parts });
             }
             "--name" => {
                 let at = time(&value("a time and a name")?)?;

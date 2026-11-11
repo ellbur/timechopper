@@ -31,12 +31,15 @@ use eframe::egui::{
 use crate::interpret::history::{self, Precedent};
 use crate::interpret::model::{Event, Time, fmt_duration};
 use crate::interpret::{
-    Diff, Doubt, Hint, Journal, Mark, Marker, Member, Record, Scope, Timeline, Why,
+    Diff, Doubt, Hint, Journal, Mark, Marker, Member, OTHER, Record, Scope, Timeline, Why,
 };
 use crate::live::{Clock, LogFile, Observation};
 
 /// The colour of what may need the user's attention.
 const DOUBT: Color32 = Color32::from_rgb(0xf2, 0x8e, 0x2b);
+
+/// The colour of parts of a task.
+const PART: Color32 = Color32::from_rgb(0xb0, 0x7a, 0xa1);
 
 /// The colour of the user's markers.
 const MARKER: Color32 = Color32::from_rgb(0x76, 0xb7, 0xb2);
@@ -104,6 +107,8 @@ pub struct Live {
 
     note: String,
     naming: Option<(Key, String)>,
+    /// A part being renamed: in which row, its name, and the new name.
+    renaming: Option<(Key, String, String)>,
     split_text: HashMap<Key, String>,
     status: Option<String>,
     placed: bool,
@@ -118,6 +123,7 @@ struct Shape {
     parent: Option<Key>,
     confirmed: bool,
     headline: String,
+    parts: Vec<crate::interpret::Part>,
 }
 
 impl Live {
@@ -148,6 +154,7 @@ impl Live {
             was_hovered: None,
             note: String::new(),
             naming: None,
+            renaming: None,
             split_text: HashMap::new(),
             status: None,
             placed: false,
@@ -291,6 +298,7 @@ impl Live {
             parent: session.parent.map(|p| t.anchor(p)),
             confirmed: session.confirmed,
             headline: session.label.headline.clone(),
+            parts: session.parts.clone(),
         }
     }
 
@@ -621,12 +629,90 @@ impl Live {
                     if header.inner.clicked() || summary.clicked() {
                         acts.push(Act::Toggle(key));
                     }
+                    self.parts(ui, t, i, open, acts);
                     self.markers(ui, t, i, open, acts);
                     if open {
                         self.details(ui, t, i, acts);
                     }
                 });
         }
+    }
+
+    /// A row's time in each part of its task, if the task is divided (always
+    /// shown); with the row open, parts can be renamed and the division
+    /// undone. Or, if earlier days divided this task, the offer to do so.
+    fn parts(&mut self, ui: &mut Ui, t: &Timeline, i: usize, open: bool, acts: &mut Vec<Act>) {
+        let session = &t.sessions[i];
+        let task = &t.tasks[session.task];
+        if task.parts.is_empty() {
+            if let Some(p) = task.division.as_ref().filter(|p| !p.applied) {
+                let mut names: Vec<&str> = p.parts.iter().map(|(_, n)| n.as_str()).collect();
+                names.dedup();
+                ui.horizontal(|ui| {
+                    let text = format!(
+                        "? divided into {} on {}",
+                        names.join(", "),
+                        history::days(&p.days)
+                    );
+                    ui.label(RichText::new(text).small().color(DOUBT));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let hint = Hint::Parts {
+                            at: t.anchor(i),
+                            parts: p.parts.clone(),
+                        };
+                        self.action(ui, "divide", Some(hint), acts);
+                    });
+                });
+            }
+            return;
+        }
+        let key = t.anchor(i);
+        ui.horizontal_wrapped(|ui| {
+            for part in &session.parts {
+                let text = format!("{} {}", part.name, fmt_duration(part.secs));
+                let label = RichText::new(text).small().color(PART);
+                match (&mut self.renaming, open && part.name != OTHER) {
+                    (Some((k, from, to)), true) if *k == key && *from == part.name => {
+                        let edit = ui.add(
+                            TextEdit::singleline(to)
+                                .id(ui.make_persistent_id(("rename", key)))
+                                .hint_text(format!("rename {from}"))
+                                .desired_width(90.0),
+                        );
+                        let entered =
+                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if entered {
+                            let hint = t.rename_part(i, from, to.trim());
+                            if !to.trim().is_empty() {
+                                acts.push(Act::Apply(hint));
+                            }
+                            self.renaming = None;
+                        }
+                    }
+                    (_, true) => {
+                        let response = ui.add(egui::Label::new(label).sense(Sense::click()));
+                        if response.on_hover_text("Click to rename").clicked() {
+                            // The box takes the keyboard when it opens.
+                            let id = ui.make_persistent_id(("rename", key));
+                            ui.memory_mut(|m| m.request_focus(id));
+                            self.renaming = Some((key, part.name.clone(), String::new()));
+                        }
+                    }
+                    (_, false) => {
+                        ui.label(label);
+                    }
+                }
+            }
+            if let Some(p) = task.division.as_ref().filter(|p| p.applied)
+                && open
+            {
+                let text = format!("divided as on {}", history::days(&p.days));
+                ui.label(RichText::new(text).small().weak());
+            }
+            if open {
+                self.action(ui, "Undivide", Some(t.undivide(i)), acts);
+            }
+        });
     }
 
     /// The user's markers in a row, always shown: they are the user's own
@@ -713,14 +799,39 @@ impl Live {
                 );
                 if session.members.len() > 1 && !session.confirmed {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.menu_button("own task…", |ui| {
+                        // One menu per thing: which part it counts towards
+                        // (if the task is divided), or taking it out.
+                        let parts = &t.tasks[session.task].parts;
+                        let label = match parts.is_empty() {
+                            true => "own task…".to_string(),
+                            false => format!("{}…", member.part.as_deref().unwrap_or(OTHER)),
+                        };
+                        ui.menu_button(label, |ui| {
+                            if !parts.is_empty() {
+                                let current = member.part.as_deref().unwrap_or(OTHER);
+                                for part in parts {
+                                    if part.name == current || part.name == OTHER {
+                                        continue;
+                                    }
+                                    let hint = t.move_to_part(i, m, &part.name);
+                                    self.action(ui, &format!("to {}", part.name), Some(hint), acts);
+                                }
+                                let own = member.name.rsplit(" · ").next().unwrap_or("");
+                                let hint = t.move_to_part(i, m, own);
+                                self.action(ui, "a part of its own", Some(hint), acts);
+                                ui.separator();
+                                ui.label(RichText::new("own task:").small().weak());
+                            }
                             let here = t.separate(i, m, Scope::Here);
                             self.action(ui, "just here", Some(here), acts);
                             let everywhere = t.separate(i, m, Scope::Everywhere);
                             self.action(ui, "wherever it shows up", Some(everywhere), acts);
                         })
                         .response
-                        .on_hover_text("Take this out of the row: it is a task of its own");
+                        .on_hover_text(match parts.is_empty() {
+                            true => "Take this out of the row: it is a task of its own",
+                            false => "Which part of the task this counts towards, or take it out",
+                        });
                     });
                 }
             });
@@ -766,10 +877,10 @@ impl Live {
                 Some((k, text)) if *k == key => {
                     let edit = ui.add(
                         TextEdit::singleline(text)
+                            .id(ui.make_persistent_id(("name", key)))
                             .hint_text("what to call it")
                             .desired_width(120.0),
                     );
-                    edit.request_focus();
                     let entered =
                         edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let name = text.trim().to_string();
@@ -790,6 +901,9 @@ impl Live {
                 }
                 _ => {
                     if ui.small_button("Name…").clicked() {
+                        // The box takes the keyboard when it opens.
+                        let id = ui.make_persistent_id(("name", key));
+                        ui.memory_mut(|m| m.request_focus(id));
                         let name = t.tasks[session.task].name.clone().unwrap_or_default();
                         self.naming = Some((key, name));
                     }
@@ -812,6 +926,26 @@ impl Live {
                     self.action(ui, &label, t.join(i, j), acts);
                 }
             });
+            // Combine with another row's task, each keeping its time as a
+            // part of the whole.
+            ui.menu_button("Combine with…", |ui| {
+                let mut others: Vec<usize> = (0..t.sessions.len())
+                    .filter(|&j| t.sessions[j].task != session.task)
+                    .collect();
+                others.sort_by_key(|&j| t.sessions[j].start.0.abs_diff(session.start.0));
+                if others.is_empty() {
+                    ui.label(RichText::new("no other rows").weak());
+                }
+                for j in others.into_iter().take(12) {
+                    let label = format!("{}  {}", t.sessions[j].start.hm(), title_of(t, j));
+                    self.action(ui, &label, t.combine(j, i), acts);
+                }
+            })
+            .response
+            .on_hover_text("Make another row's task a part of this one");
+            if t.tasks[session.task].parts.is_empty() {
+                self.action(ui, "Divide by app", t.divide_by_app(i), acts);
+            }
             // Split at a time typed in.
             let text = self.split_text.entry(key).or_default();
             ui.add(
@@ -1031,5 +1165,22 @@ pub fn describe_hint(hint: &Hint) -> String {
         }
         Hint::Name { at, name } => format!("Call the task at {} \"{name}\"", at.hm()),
         Hint::Usual { activity, name } => format!("Work on {activity} is called \"{name}\""),
+        Hint::Parts { at, parts } if parts.is_empty() => {
+            format!("The task at {} is not divided into parts", at.hm())
+        }
+        Hint::Parts { at, parts } => {
+            let mut names: Vec<&str> = parts.iter().map(|(_, n)| n.as_str()).collect();
+            names.dedup();
+            format!("Divide the task at {} into {}", at.hm(), names.join(", "))
+        }
+        Hint::Combine { from, into } => format!(
+            "The task at {} is a part of the task at {}",
+            from.hm(),
+            into.hm()
+        ),
+        Hint::UsualParts { activity, parts } => {
+            let names: Vec<&str> = parts.iter().map(|(_, n)| n.as_str()).collect();
+            format!("Work on {activity} is divided into {}", names.join(", "))
+        }
     }
 }

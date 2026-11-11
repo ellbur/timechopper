@@ -10,6 +10,8 @@
 //!   another day is probably called the same.
 //! - **Separations.** A window the user took out of a row (just there, or
 //!   everywhere) is a thing of its own, done on the side: mail, chat.
+//! - **Divisions.** A task the user divided into parts (drafting and
+//!   research) is probably divided the same way another day.
 //!
 //! Like a marker, a carried-over rule is evidence, not an order, and how
 //! much it counts depends on how consistently it held:
@@ -80,6 +82,8 @@ pub struct Precedent {
     /// Whether it is applied today without asking (otherwise it is only
     /// offered).
     pub applied: bool,
+    /// For a task's division into parts: the division.
+    pub parts: Vec<(Pattern, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -104,7 +108,13 @@ enum Parting {
 pub struct Lessons {
     names: BTreeMap<Activity, Vec<(String, Naming)>>,
     parted: BTreeMap<Activity, Vec<(String, Parting)>>,
+    /// Per task identity, how it was divided each day (`None`: a division
+    /// carried over was undone).
+    divided: BTreeMap<Activity, Vec<(String, Option<Division>)>>,
 }
+
+/// A division into parts, comparable from one day to the next.
+type Division = Vec<(Pattern, String)>;
 
 impl Lessons {
     /// Learns from these days, given oldest first.
@@ -122,7 +132,7 @@ impl Lessons {
         let mut out = Vec::new();
         for activity in self.parted.keys() {
             if self.parting(activity).is_some_and(|p| p.applied) {
-                out.push(Hint::apart(pattern_of(activity)));
+                out.push(Hint::apart(Pattern::of(activity)));
             }
         }
         for activity in self.names.keys() {
@@ -135,6 +145,14 @@ impl Lessons {
                 out.push(Hint::Usual {
                     activity: activity.clone(),
                     name,
+                });
+            }
+        }
+        for activity in self.divided.keys() {
+            if let Some(p) = self.division(activity).filter(|p| p.applied) {
+                out.push(Hint::UsualParts {
+                    activity: activity.clone(),
+                    parts: p.parts,
                 });
             }
         }
@@ -165,6 +183,7 @@ impl Lessons {
             name: Some(latest.clone()),
             applied: days.len() >= APPLY_AFTER,
             days,
+            parts: Vec::new(),
         })
     }
 
@@ -186,6 +205,27 @@ impl Lessons {
             name: None,
             applied: always || days.len() >= APPLY_AFTER,
             days,
+            parts: Vec::new(),
+        })
+    }
+
+    /// How earlier days divided the task with this identity into parts.
+    pub fn division(&self, activity: &Activity) -> Option<Precedent> {
+        let events = self.divided.get(activity)?;
+        let latest = events.last()?.1.as_ref()?;
+        let mut days: Vec<String> = events
+            .iter()
+            .rev()
+            .take_while(|(_, d)| d.as_ref() == Some(latest))
+            .map(|(day, _)| day.clone())
+            .collect();
+        days.dedup();
+        days.reverse();
+        Some(Precedent {
+            name: None,
+            applied: days.len() >= APPLY_AFTER,
+            days,
+            parts: latest.clone(),
         })
     }
 
@@ -194,6 +234,7 @@ impl Lessons {
     pub fn annotate(&self, timeline: &mut Timeline) {
         for task in &mut timeline.tasks {
             task.precedent = task.identity.as_ref().and_then(|a| self.naming(a));
+            task.division = task.identity.as_ref().and_then(|a| self.division(a));
         }
         // A separation is worth saying only where it matters: offered for
         // something swept into a row with other things, and, when applied,
@@ -243,6 +284,39 @@ impl Lessons {
         for activity in cleared {
             let events = self.names.entry(activity).or_default();
             events.push((label.clone(), Naming::Cleared));
+        }
+
+        // How each task was divided: by the user's latest division of it,
+        // or by one carried over and left standing. A division undone
+        // counts against the one carried over.
+        let mut divided: BTreeMap<Activity, Option<Division>> = BTreeMap::new();
+        for task in &t.tasks {
+            let Some(activity) = &task.identity else {
+                continue;
+            };
+            let in_task = |at: Time| {
+                let i = t.spans.partition_point(|s| s.end <= at);
+                task.sessions
+                    .iter()
+                    .any(|&s| t.sessions[s].spans.contains(&i))
+            };
+            let given = hints.iter().rev().find_map(|hint| match hint {
+                Hint::Parts { at, parts } if in_task(*at) => Some(parts.clone()),
+                _ => None,
+            });
+            let carried = self.division(activity).filter(|p| p.applied);
+            let division = match (given, carried) {
+                (Some(parts), _) if parts.is_empty() => None,
+                (Some(parts), _) => Some(parts),
+                (None, Some(p)) if !task.parts.is_empty() => Some(p.parts),
+                (None, Some(_)) => None,
+                (None, None) => continue,
+            };
+            divided.insert(activity.clone(), division);
+        }
+        for (activity, division) in divided {
+            let events = self.divided.entry(activity).or_default();
+            events.push((label.clone(), division));
         }
 
         // What the user set apart, and what they joined back.
@@ -302,6 +376,9 @@ impl Lessons {
         for events in self.parted.values_mut() {
             forget(events);
         }
+        for events in self.divided.values_mut() {
+            forget(events);
+        }
     }
 }
 
@@ -325,13 +402,5 @@ pub fn days(days: &[String]) -> String {
         [a, b] => format!("{a}, {b}"),
         [a, b, c] => format!("{a}, {b}, {c}"),
         [first, .., last] => format!("{first} to {last} ({} days)", days.len()),
-    }
-}
-
-/// The windows an activity stands for.
-fn pattern_of(activity: &Activity) -> Pattern {
-    Pattern {
-        app: Some(activity.app.clone()),
-        title: activity.subject.as_ref().map(|s| s.to_lowercase()),
     }
 }

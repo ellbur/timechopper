@@ -274,12 +274,97 @@ impl Timeline {
         }
     }
 
+    /// How this session's task is divided into parts now, as the patterns
+    /// a [`Hint::Parts`] gives: each thing in it, with the part it counts
+    /// towards (things in no part are left out). More specific patterns
+    /// (with a title) come first, so that they decide before a whole app.
+    pub fn division(&self, session: usize) -> Vec<(Pattern, String)> {
+        let task = self.sessions[session].task;
+        let mut out: Vec<(Pattern, String)> = Vec::new();
+        for &s in &self.tasks[task].sessions {
+            for member in &self.sessions[s].members {
+                let pattern = Pattern::of(&member.activity);
+                if let Some(part) = &member.part
+                    && !out.iter().any(|(p, _)| *p == pattern)
+                {
+                    out.push((pattern, part.clone()));
+                }
+            }
+        }
+        out.sort_by_key(|(p, _)| p.title.is_none());
+        out
+    }
+
+    /// The hint for a division of this session's task.
+    fn parts(&self, session: usize, parts: Vec<(Pattern, String)>) -> Hint {
+        Hint::Parts {
+            at: self.anchor(session),
+            parts,
+        }
+    }
+
+    /// Divides this session's task into one part per app it uses, named
+    /// after the app. `None` if it uses only one.
+    pub fn divide_by_app(&self, session: usize) -> Option<Hint> {
+        let task = &self.tasks[self.sessions[session].task];
+        let mut parts: Vec<(Pattern, String)> = Vec::new();
+        for &s in &task.sessions {
+            for member in &self.sessions[s].members {
+                let pattern = Pattern::app(&member.activity.app);
+                if !parts.iter().any(|(p, _)| *p == pattern) {
+                    let name = member.name.split(" · ").next().unwrap_or("").to_string();
+                    parts.push((pattern, name));
+                }
+            }
+        }
+        (parts.len() > 1).then(|| self.parts(session, parts))
+    }
+
+    /// Moves one of the things in this session (and wherever else it shows
+    /// up in the task) to the part called `part`, a new one or not.
+    pub fn move_to_part(&self, session: usize, member: usize, part: &str) -> Hint {
+        let activity = &self.sessions[session].members[member].activity;
+        let pattern = Pattern::of(activity);
+        let mut parts = self.division(session);
+        parts.retain(|(p, _)| *p != pattern);
+        parts.insert(0, (pattern, part.to_string()));
+        parts.sort_by_key(|(p, _)| p.title.is_none());
+        self.parts(session, parts)
+    }
+
+    /// Gives a part of this session's task another name. Giving it the name
+    /// of another part puts the two together.
+    pub fn rename_part(&self, session: usize, part: &str, name: &str) -> Hint {
+        let mut parts = self.division(session);
+        for (_, n) in &mut parts {
+            if n == part {
+                *n = name.to_string();
+            }
+        }
+        self.parts(session, parts)
+    }
+
+    /// Undoes the division of this session's task into parts.
+    pub fn undivide(&self, session: usize) -> Hint {
+        self.parts(session, Vec::new())
+    }
+
+    /// This session's whole task becomes a part of the task of session
+    /// `into`, each keeping its time as a part.
+    pub fn combine(&self, session: usize, into: usize) -> Option<Hint> {
+        (self.sessions[session].task != self.sessions[into].task).then(|| Hint::Combine {
+            from: self.anchor(session),
+            into: self.anchor(into),
+        })
+    }
+
     /// What differs between this timeline and another of the same log.
     pub fn diff(&self, other: &Timeline) -> Diff {
         let key = |timeline: &Timeline, i: usize| {
             let session: &Session = &timeline.sessions[i];
             let name = timeline.tasks[session.task].name.clone();
-            (timeline.intervals(i), name, session.confirmed)
+            let parts = session.parts.clone();
+            (timeline.intervals(i), name, session.confirmed, parts)
         };
         let keys = |t: &Timeline| -> Vec<_> { (0..t.sessions.len()).map(|i| key(t, i)).collect() };
         let (mine, theirs) = (keys(self), keys(other));

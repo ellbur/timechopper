@@ -83,6 +83,25 @@ pub enum Hint {
     /// [`Task::identity`] is this activity is called this. Applied before
     /// any [`Hint::Name`], which overrides it.
     Usual { activity: Activity, name: String },
+    /// The task in focus at `at` is divided into parts: time on windows
+    /// matching a pattern counts towards the part named with it (the first
+    /// pattern that matches decides); anything else is "other". Parts are
+    /// shares of the task's time, not stretches of it: the rows stay as
+    /// they are. The whole division is given at once, replacing any before
+    /// it; an empty one undoes the division.
+    Parts {
+        at: Time,
+        parts: Vec<(Pattern, String)>,
+    },
+    /// The whole task in focus at `from` is part of the task in focus at
+    /// `into`: one task, in which each keeps its time as a part.
+    Combine { from: Time, into: Time },
+    /// A standing rule, learned from earlier days: a task whose identity is
+    /// this activity is divided this way, unless divided otherwise today.
+    UsualParts {
+        activity: Activity,
+        parts: Vec<(Pattern, String)>,
+    },
 }
 
 impl Hint {
@@ -129,6 +148,27 @@ impl Hint {
                 clean(activity.subject.as_deref().unwrap_or("")),
                 clean(name),
             ],
+            Hint::Parts { at, parts } => {
+                let mut fields = vec!["parts".into(), at.to_string()];
+                for (pattern, name) in parts {
+                    fields.extend([clean(&pattern.to_string()), clean(name)]);
+                }
+                fields
+            }
+            Hint::Combine { from, into } => {
+                vec!["combine".into(), from.to_string(), into.to_string()]
+            }
+            Hint::UsualParts { activity, parts } => {
+                let mut fields = vec![
+                    "usualparts".into(),
+                    clean(&activity.app),
+                    clean(activity.subject.as_deref().unwrap_or("")),
+                ];
+                for (pattern, name) in parts {
+                    fields.extend([clean(&pattern.to_string()), clean(name)]);
+                }
+                fields
+            }
         };
         fields.join("\t")
     }
@@ -149,7 +189,37 @@ impl Hint {
                 })
                 .collect()
         };
+        let pairs = |rest: &[&str]| -> Result<Vec<(Pattern, String)>, String> {
+            rest.chunks(2)
+                .map(|pair| match pair {
+                    [pattern, name] => Ok((Pattern::parse(pattern)?, name.to_string())),
+                    _ => Err(err()),
+                })
+                .collect()
+        };
+        match fields[..] {
+            ["parts", at, ref rest @ ..] => {
+                return Ok(Hint::Parts {
+                    at: time(at)?,
+                    parts: pairs(rest)?,
+                });
+            }
+            ["usualparts", app, subject, ref rest @ ..] => {
+                return Ok(Hint::UsualParts {
+                    activity: Activity {
+                        app: app.to_string(),
+                        subject: (!subject.is_empty()).then(|| subject.to_string()),
+                    },
+                    parts: pairs(rest)?,
+                });
+            }
+            _ => {}
+        }
         Ok(match fields[..] {
+            ["combine", from, into] => Hint::Combine {
+                from: time(from)?,
+                into: time(into)?,
+            },
             ["lens", app, lens] => Hint::Lens {
                 app: app.to_string(),
                 lens: match lens {
@@ -296,6 +366,9 @@ pub struct Member {
     /// Whether, on earlier days, the user took it out of the task it was
     /// swept into: filled in by [`history::Lessons::annotate`].
     pub precedent: Option<history::Precedent>,
+    /// The part of the task it counts towards, if the task is divided
+    /// (`None` for "other").
+    pub part: Option<String>,
 }
 
 /// A point inside a session where one task may have given way to another
@@ -320,6 +393,11 @@ pub struct Task {
     /// What earlier days say it is called, if they say anything: filled in
     /// by [`history::Lessons::annotate`].
     pub precedent: Option<history::Precedent>,
+    /// The task's time divided into parts, if it is divided: they add up
+    /// to `active`.
+    pub parts: Vec<Part>,
+    /// How earlier days divided it, if they did.
+    pub division: Option<history::Precedent>,
     pub label: Label,
     /// The activities that make it up, most time first.
     pub activities: Vec<Activity>,
@@ -327,6 +405,14 @@ pub struct Task {
     pub active: u64,
     /// Indexes into [`Timeline::sessions`].
     pub sessions: Vec<usize>,
+}
+
+/// A share of a task's time: what was spent on the windows counted towards
+/// it, wherever they fell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub name: String,
+    pub secs: u64,
 }
 
 /// A stretch of work on one task, interruptions included.
@@ -351,6 +437,9 @@ pub struct Session {
     pub splits: Vec<PossibleSplit>,
     /// The user confirmed this session ([`Hint::Fixed`]).
     pub confirmed: bool,
+    /// This session's time in each of its task's parts, if the task is
+    /// divided.
+    pub parts: Vec<Part>,
     /// The user's marker this session starts at, if there is one: an index
     /// into [`Timeline::marks`].
     pub opened_by: Option<usize>,
@@ -394,6 +483,8 @@ struct Run {
     spans: Vec<usize>,
     /// The [`Hint::Fixed`] (by position) that put it where it is.
     fixed: Option<usize>,
+    /// The part of its task it counts towards, if the task is divided.
+    part: Option<String>,
 }
 
 /// A task in the making.
@@ -465,6 +556,7 @@ fn runs(
                 end: spans[i].end,
                 spans: vec![i],
                 fixed,
+                part: None,
             }),
         }
     }
@@ -551,6 +643,60 @@ pub fn interpret_marked(
     decided.extend(hints.iter().cloned());
     guess(spans, &marks, &decided, params)
 }
+
+/// What to call a task's time when it becomes a part of another: what it
+/// was mostly about.
+fn part_label(runs: &[Run], activities: &[Activity], titles: &Titles) -> String {
+    let mut secs: HashMap<usize, u64> = HashMap::new();
+    for run in runs {
+        *secs.entry(run.activity).or_default() += run.end.0 - run.start.0;
+    }
+    let main = secs
+        .into_iter()
+        .max_by_key(|&(a, s)| (s, std::cmp::Reverse(a)));
+    match main.map(|(a, _)| &activities[a]) {
+        Some(Activity {
+            subject: Some(subject),
+            ..
+        }) => subject.clone(),
+        Some(Activity { app, .. }) => titles.display_name(app).to_string(),
+        None => String::new(),
+    }
+}
+
+/// The time spent on each part, largest first, with anything not in a
+/// part last, as "other". Empty if the task is not `divided`.
+fn parts_of<'a>(runs: impl Iterator<Item = &'a Run>, divided: bool) -> Vec<Part> {
+    let mut parts: Vec<Part> = Vec::new();
+    let mut other = 0;
+    for run in runs {
+        let secs = run.end.0 - run.start.0;
+        match &run.part {
+            Some(name) => match parts.iter_mut().find(|p| p.name == *name) {
+                Some(part) => part.secs += secs,
+                None => parts.push(Part {
+                    name: name.clone(),
+                    secs,
+                }),
+            },
+            None => other += secs,
+        }
+    }
+    if !divided {
+        return Vec::new();
+    }
+    parts.sort_by(|a, b| b.secs.cmp(&a.secs).then_with(|| a.name.cmp(&b.name)));
+    if other > 0 {
+        parts.push(Part {
+            name: OTHER.to_string(),
+            secs: other,
+        });
+    }
+    parts
+}
+
+/// What the time of a divided task outside any of its parts is called.
+pub const OTHER: &str = "other";
 
 /// The activity with a subject that took the most time in these runs.
 fn identity(runs: &[Run], activities: &[Activity]) -> Option<Activity> {
@@ -745,6 +891,26 @@ fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> T
                 drafts[into].runs.extend(moved);
                 drafts[into].runs.sort_by_key(|run| run.start);
             }
+            Hint::Combine { from, into } => {
+                let draft_at = |t: Time| span_at(spans, t).and_then(|i| owner(&drafts, i));
+                let (Some(from), Some(into)) = (draft_at(*from), draft_at(*into)) else {
+                    continue;
+                };
+                if from == into {
+                    continue;
+                }
+                // Each keeps its time as a part, named after what it was
+                // mostly about (the user can rename it).
+                for draft in [from, into] {
+                    let label = part_label(&drafts[draft].runs, &activities, &titles);
+                    for run in drafts[draft].runs.iter_mut().filter(|r| r.part.is_none()) {
+                        run.part = Some(label.clone());
+                    }
+                }
+                let moved = std::mem::take(&mut drafts[from].runs);
+                drafts[into].runs.extend(moved);
+                drafts[into].runs.sort_by_key(|run| run.start);
+            }
             _ => {}
         }
     }
@@ -787,6 +953,38 @@ fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> T
             drafts[first].runs.sort_by_key(|run| run.start);
         }
     }
+    // Divisions into parts: the user's latest for each task, or failing
+    // that (and failing a combination), one carried over from earlier days.
+    for draft in &mut drafts {
+        let division = hints.iter().rev().find_map(|hint| match hint {
+            Hint::Parts { at, parts }
+                if span_at(spans, *at)
+                    .is_some_and(|i| draft.runs.iter().any(|r| r.spans.contains(&i))) =>
+            {
+                Some(parts)
+            }
+            _ => None,
+        });
+        let division = division.or_else(|| {
+            if draft.runs.iter().any(|r| r.part.is_some()) {
+                return None;
+            }
+            let id = identity(&draft.runs, &activities)?;
+            hints.iter().rev().find_map(|hint| match hint {
+                Hint::UsualParts { activity, parts } if *activity == id => Some(parts),
+                _ => None,
+            })
+        });
+        if let Some(parts) = division {
+            for run in &mut draft.runs {
+                let window = &spans[run.spans[0]].window;
+                run.part = parts
+                    .iter()
+                    .find(|(pattern, _)| pattern.matches(window))
+                    .map(|(_, name)| name.clone());
+            }
+        }
+    }
     drafts.retain(|draft| !draft.runs.is_empty());
     drafts.sort_by_key(|draft| draft.runs[0].start);
 
@@ -814,15 +1012,18 @@ fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> T
             *secs.entry(run.activity).or_default() += run.end.0 - run.start.0;
             all_spans.extend(&run.spans);
         }
+        let divided = draft.runs.iter().any(|r| r.part.is_some());
         for session in sessions_of(&draft.runs, params.max_gap) {
             let runs: Vec<&Run> = session.iter().map(|&i| &draft.runs[i]).collect();
-            sessions.push(describe.session(tasks.len(), &runs));
+            sessions.push(describe.session(tasks.len(), &runs, divided));
         }
         let mut by_time: Vec<(u64, usize)> = secs.into_iter().map(|(a, s)| (s, a)).collect();
         by_time.sort_by_key(|&(s, a)| (std::cmp::Reverse(s), a));
         tasks.push(Task {
             identity: identity(&draft.runs, &activities),
             precedent: None,
+            parts: parts_of(draft.runs.iter(), divided),
+            division: None,
             name: draft.name,
             label: describe.label(&all_spans),
             active: by_time.iter().map(|&(s, _)| s).sum(),
@@ -967,8 +1168,9 @@ impl Describe<'_> {
         subject.clone().unwrap_or_else(app)
     }
 
-    /// One session of task `task`, made of `runs`.
-    fn session(&self, task: usize, runs: &[&Run]) -> Session {
+    /// One session of task `task`, made of `runs`; `divided` if the task is
+    /// divided into parts.
+    fn session(&self, task: usize, runs: &[&Run], divided: bool) -> Session {
         let confirmed = runs.iter().all(|run| run.fixed.is_some());
         let spans: Vec<usize> = runs.iter().flat_map(|run| run.spans.clone()).collect();
         let active: u64 = spans.iter().map(|&i| self.spans[i].secs()).sum();
@@ -991,12 +1193,16 @@ impl Describe<'_> {
                     doubts: Vec::new(),
                     spans: Vec::new(),
                     precedent: None,
+                    part: None,
                 });
                 members.len() - 1
             });
             members[m].secs += run.end.0 - run.start.0;
             members[m].visits += 1;
             members[m].spans.extend(&run.spans);
+            if run.part.is_some() {
+                members[m].part = run.part.clone();
+            }
         }
         members.sort_by(|a, b| (b.secs, &a.activity).cmp(&(a.secs, &b.activity)));
         for (m, member) in members.iter_mut().enumerate() {
@@ -1086,6 +1292,7 @@ impl Describe<'_> {
             confirmed,
             opened_by: None,
             marks: Vec::new(),
+            parts: parts_of(runs.iter().copied(), divided),
             spans,
         }
     }

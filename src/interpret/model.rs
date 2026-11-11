@@ -435,6 +435,42 @@ mod tests {
                 at: t("09:00"),
                 name: "Budget: Q3, second pass".into(),
             },
+            Hint::Name {
+                at: t("09:00"),
+                name: String::new(),
+            },
+            Hint::Parts {
+                at: t("09:48"),
+                parts: vec![
+                    (Pattern::parse("winword").unwrap(), "Drafting".into()),
+                    (
+                        Pattern::parse("firefox:westlaw").unwrap(),
+                        "Research: cases".into(),
+                    ),
+                ],
+            },
+            Hint::Parts {
+                at: t("09:48"),
+                parts: Vec::new(),
+            },
+            Hint::Combine {
+                from: t("09:00"),
+                into: t("09:48"),
+            },
+            Hint::UsualParts {
+                activity: super::super::Activity {
+                    app: "winword".into(),
+                    subject: Some("brief.docx".into()),
+                },
+                parts: vec![(Pattern::parse("winword").unwrap(), "Drafting".into())],
+            },
+            Hint::Usual {
+                activity: super::super::Activity {
+                    app: "code".into(),
+                    subject: None,
+                },
+                name: "Coding".into(),
+            },
         ];
         let mut records: Vec<Record> = hints
             .iter()

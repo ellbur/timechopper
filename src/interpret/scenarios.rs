@@ -398,6 +398,38 @@ pub fn week() -> Vec<crate::interpret::history::Day> {
         .collect()
 }
 
+/// A legal brief: research on its own first, then drafting in Word with
+/// constant trips back to the research.
+pub fn brief() -> Vec<Span> {
+    let westlaw = |what: &str| page(&format!("{what} - Westlaw"));
+    let word = "Smith v. Jones brief.docx - Word";
+    let mut s = Script::at(9, 0);
+    for case in [
+        "Doe v. Roe",
+        "Acme v. Widget Co.",
+        "In re Smith",
+        "Jones v. State",
+    ] {
+        s.focus(FIREFOX, &westlaw(case), 420);
+    }
+    s.idle(20 * 60);
+    let cases = [
+        "Doe v. Roe",
+        "Acme v. Widget Co.",
+        "In re Smith",
+        "Jones v. State",
+    ];
+    for round in 0..18u64 {
+        s.focus(WORD, word, 150 + (round * 37) % 150).focus(
+            FIREFOX,
+            &westlaw(cases[round as usize % 4]),
+            50 + (round * 23) % 70,
+        );
+    }
+    s.focus(WORD, word, 300);
+    s.finish()
+}
+
 fn no_marks() -> Vec<Marker> {
     Vec::new()
 }
@@ -410,7 +442,7 @@ pub struct Scenario {
     pub marks: fn() -> Vec<Marker>,
 }
 
-pub const ALL: [Scenario; 10] = [
+pub const ALL: [Scenario; 11] = [
     Scenario {
         name: "alternation",
         about: "Back and forth between Notepad and a browser.",
@@ -470,5 +502,11 @@ pub const ALL: [Scenario; 10] = [
         about: "The buried switch again, with what the user marked along the way.",
         spans: marked_day,
         marks: marked_day_marks,
+    },
+    Scenario {
+        name: "brief",
+        about: "A legal brief: research, then drafting with constant trips back to it.",
+        spans: brief,
+        marks: no_marks,
     },
 ];

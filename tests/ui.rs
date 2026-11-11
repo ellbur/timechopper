@@ -10,6 +10,7 @@ use eframe::egui;
 use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use timechopper::interpret::model::fmt_duration;
 use timechopper::interpret::scenarios::{self, FIREFOX, NOTEPAD, OUTLOOK};
 use timechopper::interpret::{
     Event, Journal, Mark, Marker, Params, Record, Scope, Span, Time, Window,
@@ -314,7 +315,7 @@ fn rows_can_be_named_and_confirmed() {
     let boxes: Vec<_> = h.get_all_by_role(Role::TextInput).collect();
     boxes[1].type_text("Q3 report");
     h.run();
-    h.get_by_label("OK").click();
+    h.key_press(egui::Key::Enter);
     h.run();
     let timeline = h.state().timeline();
     assert_eq!(timeline.tasks[0].name.as_deref(), Some("Q3 report"));
@@ -452,4 +453,58 @@ fn what_earlier_days_say_is_offered_then_applied() {
     h.run();
     let t = h.state().timeline();
     assert_eq!(t.tasks[t.sessions[billing].task].name, None);
+}
+
+#[test]
+fn a_task_can_be_divided_into_parts_from_its_row() {
+    let (mut h, rig) = harness();
+    let brief = scenarios::ALL.iter().find(|s| s.name == "brief").unwrap();
+    rig.play(&(brief.spans)());
+    h.run();
+    let t = h.state().timeline().clone();
+    assert_eq!(t.sessions.len(), 2);
+    let row = t
+        .sessions
+        .iter()
+        .position(|s| s.members.iter().any(|m| m.activity.app == "winword"))
+        .unwrap();
+    let title = t.sessions[row].label.headline.clone();
+    h.get_all_by_label(&title).last().unwrap().click();
+    h.run();
+    h.get_by_label("Divide by app").click();
+    h.run();
+    let t = h.state().timeline().clone();
+    assert_eq!(t.sessions.len(), 2, "dividing makes no new rows");
+    let parts = &t.sessions[row].parts;
+    assert_eq!(parts.len(), 2);
+    let word = format!("Word {}", fmt_duration(parts[0].secs));
+    assert!(h.query_by_label(&word).is_some());
+
+    // Click a part to rename it.
+    h.get_by_label(&word).click();
+    h.run();
+    h.get_all_by_role(Role::TextInput)
+        .nth(1)
+        .unwrap()
+        .type_text("Drafting");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let t = h.state().timeline().clone();
+    assert_eq!(t.tasks[t.sessions[row].task].parts[0].name, "Drafting");
+
+    // Combine the morning's research into it: one task, still two rows.
+    h.get_by_label("Combine with…").click();
+    h.run();
+    let research = 1 - row;
+    let label = format!(
+        "{}  {}",
+        t.sessions[research].start.hm(),
+        t.sessions[research].label.headline
+    );
+    h.get_by_label(&label).click();
+    h.run();
+    let t = h.state().timeline();
+    assert_eq!(t.tasks.len(), 1);
+    assert_eq!(t.sessions.len(), 2);
 }
