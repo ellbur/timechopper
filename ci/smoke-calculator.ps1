@@ -25,10 +25,15 @@ if ($hwnd -eq [IntPtr]::Zero) { throw 'Calculator window did not appear' }
 Start-Sleep -Seconds 2
 Set-Foreground $hwnd 'Calculator'
 
+Write-Host '--- --once while Calculator is focused ---'
+$once = (& $Exe --once | Out-String)
+Write-Host $once
+
 $out = Stop-Watcher $w
 Get-Process CalculatorApp, Calculator -ErrorAction SilentlyContinue | Stop-Process -Force
 
 Assert-Match $out 'class:\s+ApplicationFrameWindow' 'the UWP frame window'
 Assert-Match $out '(?i)host:\s+pid \d+, \S*\\ApplicationFrameHost\.exe' 'ApplicationFrameHost as host'
 Assert-Match $out '(?i)exe:\s+\S*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process'
+Assert-Match $once '(?i)exe:\s+\S*\\WindowsApps\\Microsoft\.WindowsCalculator_[^\\]+\\Calculator(App)?\.exe' 'the Calculator app process (--once)'
 Write-Host 'Calculator smoke test passed'

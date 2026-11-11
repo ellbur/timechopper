@@ -8,7 +8,8 @@ learned about it each time focus moves or the focused window's title changes:
 - the process's full command line
 
 UWP apps (hosted by `ApplicationFrameHost.exe`) are resolved to the real app
-process.
+process. If the app window is not attached to its frame yet (for a moment
+after an app starts), the report waits up to 5 seconds for it.
 
 ## Usage
 
