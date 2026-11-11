@@ -1,0 +1,75 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The interpretation of focus logs is plain Rust and runs anywhere.
+  interpret:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: cargo test
+
+      - name: Demo (synthetic logs)
+        run: cargo run --quiet -- demo
+
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustc --version
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run --once
+        run: ./target/release/timechopper.exe --once
+
+      - name: Install ffmpeg (screen recording)
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+          ffmpeg -version | Select-Object -First 1
+
+      - name: Smoke test (Notepad)
+        shell: pwsh
+        run: ./ci/smoke-notepad.ps1
+
+      - name: Smoke test (Calculator, UWP)
+        shell: pwsh
+        run: ./ci/smoke-calculator.ps1
+
+      - name: Smoke test (live window)
+        shell: pwsh
+        run: ./ci/smoke-ui.ps1
+
+      - name: Upload screen recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-recordings
+          path: ${{ runner.temp }}/videos/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timechopper-windows
+          path: target/release/timechopper.exe
