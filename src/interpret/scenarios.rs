@@ -1,12 +1,13 @@
 //! Synthetic focus logs: made-up working days, small and large, to try the
 //! interpretation on without a real desktop.
 
-use super::model::{Event, Span, Time, Window, spans};
+use super::model::{Event, Mark, Marker, Span, Time, Window, spans};
 
 /// Writes a focus log by saying how long each window was used.
 pub struct Script {
     now: Time,
     events: Vec<Event>,
+    marks: Vec<Marker>,
 }
 
 impl Script {
@@ -14,6 +15,7 @@ impl Script {
         Script {
             now: Time::hms(h, m, 0),
             events: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -38,6 +40,42 @@ impl Script {
     /// Nothing is used for `secs` seconds.
     pub fn idle(&mut self, secs: u64) -> &mut Script {
         self.push(None, secs)
+    }
+
+    /// The user marks this moment, with a note (or none).
+    pub fn note(&mut self, text: &str) -> &mut Script {
+        self.marker(Mark::Note(text.to_string()))
+    }
+
+    /// The user says they are taking a break.
+    pub fn rest(&mut self, text: &str) -> &mut Script {
+        self.marker(Mark::Break(text.to_string()))
+    }
+
+    /// The window in focus is closed (focus moves on with the next call).
+    pub fn close(&mut self) -> &mut Script {
+        let window = self.events.iter().rev().find_map(|e| e.window.clone());
+        match window {
+            Some(window) => self.marker(Mark::Closed(window)),
+            None => self,
+        }
+    }
+
+    fn marker(&mut self, mark: Mark) -> &mut Script {
+        self.marks.push(Marker { at: self.now, mark });
+        self
+    }
+
+    /// Moves the clock back or forward without anything happening: for
+    /// marking a moment other than the latest.
+    pub fn shift(&mut self, secs: i64) -> &mut Script {
+        self.now = Time(self.now.0.saturating_add_signed(secs));
+        self
+    }
+
+    /// What was marked.
+    pub fn marks(&self) -> Vec<Marker> {
+        self.marks.clone()
     }
 
     pub fn finish(&mut self) -> Vec<Span> {
@@ -247,56 +285,118 @@ pub fn buried_switch() -> Vec<Span> {
     s.finish()
 }
 
+/// A day with what the user marked during it.
+fn marked_day_script() -> Script {
+    let mut s = Script::at(9, 0);
+    s.note("idle detection for the watcher");
+    let mut reading = 0;
+    for (project, note) in [("timechopper", None), ("billing", Some("invoice export"))] {
+        if let Some(note) = note {
+            // Noted a little before getting to it.
+            s.shift(-20).note(note).shift(20);
+        }
+        for round in 0..5 {
+            reading += 1;
+            if project == "billing" && round == 3 {
+                s.note("Sam called about the export format");
+            }
+            s.focus(CODE, &code(["lib.rs", "api.rs"][round % 2], project), 80)
+                .focus(FIREFOX, &page(&format!("Search result {reading}")), 320);
+        }
+    }
+    // A glance at the news on the way out: in the same browser, so only the
+    // marker says it was not work.
+    s.rest("lunch")
+        .focus(FIREFOX, &page("BBC News"), 150)
+        .focus(FIREFOX, &page("Weather forecast"), 90)
+        .idle(40 * 60)
+        .note("")
+        .focus(CODE, &code("lib.rs", "billing"), 600)
+        .focus(FIREFOX, &page("Search result 11"), 300)
+        .close()
+        .focus(CODE, &code("lib.rs", "billing"), 400);
+    s
+}
+
+pub fn marked_day() -> Vec<Span> {
+    marked_day_script().finish()
+}
+
+pub fn marked_day_marks() -> Vec<Marker> {
+    marked_day_script().marks()
+}
+
+fn no_marks() -> Vec<Marker> {
+    Vec::new()
+}
+
 pub struct Scenario {
     pub name: &'static str,
     pub about: &'static str,
     pub spans: fn() -> Vec<Span>,
+    /// What the user marked, and windows opened and closed.
+    pub marks: fn() -> Vec<Marker>,
 }
 
-pub const ALL: [Scenario; 9] = [
+pub const ALL: [Scenario; 10] = [
     Scenario {
         name: "alternation",
         about: "Back and forth between Notepad and a browser.",
         spans: alternation,
+        marks: no_marks,
     },
     Scenario {
         name: "carve-out",
         about: "The same, with forty seconds of email in the middle.",
         spans: carve_out,
+        marks: no_marks,
     },
     Scenario {
         name: "uninformative",
         about: "An unsaved Notepad window; only the browser says what it is about.",
         spans: uninformative,
+        marks: no_marks,
     },
     Scenario {
         name: "project-switch",
         about: "One project, then another, in the same editor, browser and terminal.",
         spans: project_switch,
+        marks: no_marks,
     },
     Scenario {
         name: "resumed",
         about: "A spreadsheet, a forty-minute meeting, the spreadsheet again.",
         spans: resumed,
+        marks: no_marks,
     },
     Scenario {
         name: "messy-day",
         about: "Email now and then, two projects, a meeting, a report, lunch.",
         spans: messy_day,
+        marks: no_marks,
     },
     Scenario {
         name: "webmail",
         about: "Mail in a tab of the browser the task is using.",
         spans: webmail,
+        marks: no_marks,
     },
     Scenario {
         name: "email-twice",
         about: "Two looks at email during one stretch of programming.",
         spans: email_twice,
+        marks: no_marks,
     },
     Scenario {
         name: "buried-switch",
         about: "A change of project, with most of the time spent in the browser.",
         spans: buried_switch,
+        marks: no_marks,
+    },
+    Scenario {
+        name: "marked-day",
+        about: "The buried switch again, with what the user marked along the way.",
+        spans: marked_day,
+        marks: marked_day_marks,
     },
 ];

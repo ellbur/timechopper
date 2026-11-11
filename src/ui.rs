@@ -7,14 +7,16 @@
 //! [`Journal`], and re-interprets whenever something changes. Each frame
 //! shows:
 //!
-//! - **Now**: the window in focus and the row it is part of, with buttons to
-//!   say "this is a new task from now on" and to name the task.
+//! - **Now**: the window in focus and the row it is part of, and a box to
+//!   mark the moment (a note, or a break). A marker is not a task: it is
+//!   evidence of where one may have ended, which the guess weighs and the
+//!   user can come back to.
 //! - **Rows**: newest first, carve-outs indented under the row they
 //!   interrupted. A row that just changed shape flashes. Clicking a row opens
 //!   what it is made of and what can be done to it; hovering over an action
 //!   outlines the rows it would change.
-//! - **Focus changes**: the log itself, newest first, each marked with the
-//!   colour of the task it went to.
+//! - **Log**: focus changes and markers (the user's, and windows opened and
+//!   closed), newest first, each focus change in the colour of its task.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,14 +28,24 @@ use eframe::egui::{
     TextEdit, Ui,
 };
 
-use crate::interpret::model::{Time, fmt_duration};
-use crate::interpret::{Diff, Doubt, Hint, Journal, Scope, Timeline, Why};
+use crate::interpret::model::{Event, Time, fmt_duration};
+use crate::interpret::{Diff, Doubt, Hint, Journal, Mark, Marker, Record, Scope, Timeline, Why};
 use crate::live::{Clock, LogFile, Observation};
+
+/// The colour of the user's markers.
+const MARKER: Color32 = Color32::from_rgb(0x76, 0xb7, 0xb2);
 
 /// How long a row that changed shape stays highlighted.
 const FLASH: Duration = Duration::from_millis(2500);
 /// How many focus changes the log at the bottom shows.
 const RECENT: usize = 200;
+
+/// A line of the log at the bottom: a focus change (a span, and when it
+/// ended) or a marker.
+enum Line {
+    Focus(usize, Time),
+    Marker(usize),
+}
 
 /// A row, identified across re-interpretations by when it first had focus.
 type Key = Time;
@@ -41,8 +53,16 @@ type Key = Time;
 /// Something the user asked for while a frame was being drawn.
 enum Act {
     Apply(Hint),
+    Mark(Mark),
     Undo,
     Toggle(Key),
+}
+
+/// Something the user did that Undo can take back.
+enum Done {
+    Hint,
+    /// A marker, made at this time.
+    Mark(Time),
 }
 
 pub struct Live {
@@ -57,8 +77,10 @@ pub struct Live {
     /// Whether anything other than the passing of time changed since
     /// `timeline` was made.
     stale: bool,
-    /// The last observation, which tells what is in focus now.
-    current: Option<Observation>,
+    /// The last focus change, which tells what is in focus now.
+    current: Option<Event>,
+    /// What Undo would take back, latest last.
+    done: Vec<Done>,
 
     /// Rows that changed shape lately, and when.
     flashes: HashMap<Key, Instant>,
@@ -74,7 +96,7 @@ pub struct Live {
     hovered: Option<Hint>,
     was_hovered: Option<Hint>,
 
-    new_task_name: String,
+    note: String,
     naming: Option<(Key, String)>,
     split_text: HashMap<Key, String>,
     status: Option<String>,
@@ -111,13 +133,14 @@ impl Live {
             now,
             stale: true,
             current: None,
+            done: Vec::new(),
             flashes: HashMap::new(),
             shapes: HashMap::new(),
             open: HashSet::new(),
             preview: None,
             hovered: None,
             was_hovered: None,
-            new_task_name: String::new(),
+            note: String::new(),
             naming: None,
             split_text: HashMap::new(),
             status: None,
@@ -154,32 +177,68 @@ impl Live {
         self.note_changes();
     }
 
-    fn observe(&mut self, observation: Observation) {
-        // The journal needs observations in order; one can come out of order
-        // only if the clock was put back.
-        let at = observation.at.max(self.journal.latest().unwrap_or(Time(0)));
-        let observation = Observation { at, ..observation };
+    fn observe(&mut self, record: Observation) {
+        let record = match record {
+            // The journal needs focus changes in order; one can come out of
+            // order only if the clock was put back.
+            Record::Focus(event) => {
+                let at = event.at.max(self.journal.latest().unwrap_or(Time(0)));
+                let event = Event { at, ..event };
+                self.current = Some(event.clone());
+                Record::Focus(event)
+            }
+            other => other,
+        };
         if let Some(log) = &mut self.log
-            && let Err(e) = log.write(&observation)
+            && let Err(e) = log.write(&record)
         {
             self.status = Some(format!("could not write {}: {e}", log.path().display()));
         }
-        self.journal.observe(at, observation.window.clone());
-        self.current = Some(observation);
+        self.journal.record(record);
         self.stale = true;
+    }
+
+    /// The user marks this moment: with a note, or as the start of a break.
+    /// It is kept in the log with everything else.
+    pub fn mark(&mut self, mark: Mark) {
+        let at = self.clock.now().max(self.now);
+        self.observe(Record::Mark(Marker { at, mark }));
+        self.done.push(Done::Mark(at));
+        self.refresh();
     }
 
     /// Applies a correction now.
     pub fn apply(&mut self, hint: Hint) {
         self.journal.apply(hint);
+        self.done.push(Done::Hint);
         self.stale = true;
         self.refresh();
     }
 
+    /// Takes back the latest correction or marker.
     pub fn undo(&mut self) {
-        if self.journal.undo().is_some() {
-            self.stale = true;
-            self.refresh();
+        match self.done.pop() {
+            Some(Done::Hint) => {
+                self.journal.undo();
+            }
+            Some(Done::Mark(mark)) => {
+                let at = self.clock.now().max(self.now);
+                self.observe(Record::Unmark { at, mark });
+            }
+            None => return,
+        }
+        self.stale = true;
+        self.refresh();
+    }
+
+    /// What Undo would take back, in words.
+    fn undoable(&self) -> Option<String> {
+        match self.done.last()? {
+            Done::Hint => self.journal.hints().last().map(describe_hint),
+            Done::Mark(at) => {
+                let marker = self.journal.marks().iter().rfind(|m| m.at == *at)?;
+                Some(format!("Take back: {} at {}", marker.mark, at.hm()))
+            }
         }
     }
 
@@ -218,19 +277,6 @@ impl Live {
         let last = t.spans.len().checked_sub(1)?;
         (t.spans[last].end == self.now && t.spans[last].window == *window)
             .then(|| t.sessions.iter().position(|s| s.spans.contains(&last)))?
-    }
-
-    /// From now on, what the user does is a new task (called `name`, if
-    /// given).
-    pub fn start_new_task(&mut self, name: &str) {
-        let at = self.now;
-        self.apply(Hint::Split { at });
-        if !name.trim().is_empty() {
-            self.apply(Hint::Name {
-                at,
-                name: name.trim().to_string(),
-            });
-        }
     }
 
     // ---- drawing ----
@@ -305,6 +351,7 @@ impl Live {
         for act in acts {
             match act {
                 Act::Apply(hint) => self.apply(hint),
+                Act::Mark(mark) => self.mark(mark),
                 Act::Undo => self.undo(),
                 Act::Toggle(key) => {
                     if !self.open.remove(&key) {
@@ -363,30 +410,34 @@ impl Live {
         });
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let last = self.journal.hints().last().map(describe_hint);
+                let last = self.undoable();
                 let undo = ui.add_enabled(last.is_some(), egui::Button::new("Undo"));
                 if undo.on_hover_text(last.unwrap_or_default()).clicked() {
                     acts.push(Act::Undo);
                 }
-                let clicked = ui
-                    .button("New task")
-                    .on_hover_text("From now on, this is a different task")
+                let rest = ui
+                    .button("Break")
+                    .on_hover_text("Mark the start of a break (with the note, if any)")
                     .clicked();
-                let edit = TextEdit::singleline(&mut self.new_task_name)
-                    .hint_text("what you are starting")
+                let mark = ui
+                    .button("Mark")
+                    .on_hover_text(
+                        "Mark this moment, with the note if any: something changed here. \
+                         It helps find where tasks begin and end; it doesn't start one",
+                    )
+                    .clicked();
+                let edit = TextEdit::singleline(&mut self.note)
+                    .hint_text("note (optional)")
                     .desired_width(ui.available_width());
                 let response = ui.add(edit);
                 let entered =
                     response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if clicked || entered {
-                    let name = std::mem::take(&mut self.new_task_name);
-                    acts.push(Act::Apply(Hint::Split { at: self.now }));
-                    if !name.trim().is_empty() {
-                        acts.push(Act::Apply(Hint::Name {
-                            at: self.now,
-                            name: name.trim().to_string(),
-                        }));
-                    }
+                if mark || entered || rest {
+                    let text = std::mem::take(&mut self.note).trim().to_string();
+                    acts.push(Act::Mark(match rest {
+                        true => Mark::Break(text),
+                        false => Mark::Note(text),
+                    }));
                 }
             });
         });
@@ -525,10 +576,44 @@ impl Live {
                     if header.inner.clicked() || summary.clicked() {
                         acts.push(Act::Toggle(key));
                     }
+                    self.markers(ui, t, i, open, acts);
                     if open {
                         self.details(ui, t, i, acts);
                     }
                 });
+        }
+    }
+
+    /// The user's markers in a row, always shown: they are the user's own
+    /// account of the day. With the row open, each can be acted on.
+    fn markers(&mut self, ui: &mut Ui, t: &Timeline, i: usize, open: bool, acts: &mut Vec<Act>) {
+        let session = &t.sessions[i];
+        let starts = session.opened_by.into_iter().map(|k| (k, true));
+        for (k, first) in starts.chain(session.marks.iter().map(|&k| (k, false))) {
+            let marker = &t.marks[k];
+            ui.horizontal(|ui| {
+                let text = match first {
+                    true => format!("> {}  {}  (starts here)", marker.at.hm(), marker.mark),
+                    false => format!("> {}  {}", marker.at.hm(), marker.mark),
+                };
+                ui.label(RichText::new(text).small().color(MARKER));
+                if !open {
+                    return;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // What a row starts with may say what it is; something
+                    // marked partway through may be where another begins.
+                    match (first, marker.mark.text()) {
+                        (true, Some(text))
+                            if t.tasks[session.task].name.as_deref() != Some(text) =>
+                        {
+                            self.action(ui, "use as name", Some(t.name(i, text)), acts)
+                        }
+                        (true, _) => {}
+                        (false, _) => self.action(ui, "split here", t.split(i, marker.at), acts),
+                    }
+                });
+            });
         }
     }
 
@@ -673,7 +758,7 @@ impl Live {
     fn log_panel(&mut self, ui: &mut Ui, acts: &mut Vec<Act>) {
         let t = self.timeline.clone();
         ui.add_space(2.0);
-        ui.label(RichText::new("Focus changes").strong());
+        ui.label(RichText::new("Log").strong());
         let mut owner = vec![None; t.spans.len()];
         for (i, session) in t.sessions.iter().enumerate() {
             for &s in &session.spans {
@@ -696,12 +781,42 @@ impl Live {
             }
         }
         let live = self.current_session().is_some();
-        let count = entries.len();
+        let count = entries.len() + t.marks.len();
+        // Markers between the focus changes, at their times.
+        let mut lines: Vec<Line> = entries
+            .iter()
+            .map(|&(s, end)| Line::Focus(s, end))
+            .collect();
+        lines.extend((0..t.marks.len()).map(Line::Marker));
+        let at = |line: &Line| match *line {
+            Line::Focus(s, _) => (t.spans[s].start, 1),
+            Line::Marker(k) => (t.marks[k].at, 0),
+        };
+        lines.sort_by_key(at);
+        let newest_focus = entries.len().checked_sub(1).map(|n| entries[n].0);
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (n, &(s, end)) in entries.iter().rev().take(RECENT).enumerate() {
+                for line in lines.iter().rev().take(RECENT) {
+                    let (s, end) = match *line {
+                        Line::Focus(s, end) => (s, end),
+                        Line::Marker(k) => {
+                            let marker = &t.marks[k];
+                            ui.horizontal(|ui| {
+                                swatch(ui, Color32::TRANSPARENT);
+                                ui.label(RichText::new(marker.at.to_string()).monospace().small());
+                                let text = RichText::new(marker.mark.to_string()).small();
+                                let text = match marker.mark.by_user() {
+                                    true => text.color(MARKER).strong(),
+                                    false => text.weak().italics(),
+                                };
+                                ui.add(egui::Label::new(text).truncate());
+                            });
+                            continue;
+                        }
+                    };
                     let span = &t.spans[s];
+                    let n = usize::from(Some(s) != newest_focus);
                     ui.horizontal(|ui| {
                         match owner[s] {
                             Some(i) => swatch(ui, self.color(t.sessions[i].task)),

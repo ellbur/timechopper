@@ -35,7 +35,7 @@ pub mod title;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use journal::{Diff, Journal, Scope};
-pub use model::{Event, Span, Time, Window};
+pub use model::{Event, Mark, Marker, Record, Span, Time, Window};
 pub use title::{Activity, Lens, Pattern};
 
 use structure::Visit;
@@ -102,6 +102,9 @@ pub struct Params {
     /// A split that falls short of `min_exclusive_share` but reaches this is
     /// offered as a [`PossibleSplit`].
     pub near_miss_share: f64,
+    /// How far apart, in seconds, a marker and a change of work may be and
+    /// still be about the same moment.
+    pub mark_tolerance: u64,
 }
 
 impl Default for Params {
@@ -110,6 +113,7 @@ impl Default for Params {
             max_gap: 15 * 60,
             min_exclusive_share: 0.5,
             near_miss_share: 0.25,
+            mark_tolerance: 120,
         }
     }
 }
@@ -219,6 +223,11 @@ pub struct Session {
     pub splits: Vec<PossibleSplit>,
     /// The user confirmed this session ([`Hint::Fixed`]).
     pub confirmed: bool,
+    /// The user's marker this session starts at, if there is one: an index
+    /// into [`Timeline::marks`].
+    pub opened_by: Option<usize>,
+    /// The user's other markers made while this session was going on.
+    pub marks: Vec<usize>,
     /// Indexes into [`Timeline::spans`].
     pub spans: Vec<usize>,
 }
@@ -241,6 +250,9 @@ pub struct Timeline {
     pub tasks: Vec<Task>,
     /// Ordered by start.
     pub sessions: Vec<Session>,
+    /// Everything marked along the way, in time order: the user's notes and
+    /// breaks, and windows opened and closed.
+    pub marks: Vec<Marker>,
     /// Seconds of the log during which some window had focus. Always the sum
     /// of the tasks' (and of the sessions') active time.
     pub tracked: u64,
@@ -369,6 +381,52 @@ fn owner(drafts: &[Draft], span: usize) -> Option<usize> {
 /// Interprets a focus log. `spans` must be in time order and not overlap,
 /// as produced by [`model::spans`].
 pub fn interpret(spans: &[Span], hints: &[Hint], params: &Params) -> Timeline {
+    interpret_marked(spans, &[], hints, params)
+}
+
+/// Interprets a focus log along with what was marked as it went on.
+///
+/// A marker is evidence that something ended there, not that something new
+/// went on from there. Where the guess would only *offer* a split (a
+/// [`PossibleSplit`]: the work changes, but not clearly enough), a marker at
+/// that moment (the user's note or break, or a window being closed) decides
+/// it. A marker where the work doesn't change cuts nothing. The user's
+/// markers are listed with the rows they fall in, as the user's own account
+/// of the day to reconstruct it from.
+pub fn interpret_marked(
+    spans: &[Span],
+    marks: &[Marker],
+    hints: &[Hint],
+    params: &Params,
+) -> Timeline {
+    let mut marks = marks.to_vec();
+    marks.sort_by_key(|m| m.at);
+    let first = guess(spans, &marks, hints, params);
+    // Possible splits with a marker at them become splits. They come before
+    // the user's own corrections, so that a Join can undo one.
+    let evidence = marks.iter().filter(|m| m.mark.ends_something());
+    let evidence: Vec<Time> = evidence.map(|m| m.at).collect();
+    let mut decided: Vec<Hint> = Vec::new();
+    for session in &first.sessions {
+        for split in &session.splits {
+            if evidence
+                .iter()
+                .any(|e| e.0.abs_diff(split.at.0) <= params.mark_tolerance)
+            {
+                decided.push(Hint::Split { at: split.at });
+            }
+        }
+    }
+    if decided.is_empty() {
+        return first;
+    }
+    decided.extend(hints.iter().cloned());
+    guess(spans, &marks, &decided, params)
+}
+
+/// One pass of interpretation; `marks` must be in time order.
+fn guess(spans: &[Span], marks: &[Marker], hints: &[Hint], params: &Params) -> Timeline {
+    let marks = marks.to_vec();
     let spans = cut(spans, hints);
     let spans = &spans[..];
     let titles = Titles::learn(spans);
@@ -683,11 +741,48 @@ pub fn interpret(spans: &[Span], hints: &[Hint], params: &Params) -> Timeline {
         }
     }
 
+    attach(&mut sessions, spans, &marks, params.mark_tolerance);
+
     Timeline {
         tracked: spans.iter().map(Span::secs).sum(),
         spans: spans.to_vec(),
         tasks,
         sessions,
+        marks,
+    }
+}
+
+/// Lists each of the user's markers with the session it belongs to: the
+/// one starting at that moment, give or take `tolerance`; else the one in
+/// focus at the time; else the next one, or failing that the last.
+fn attach(sessions: &mut [Session], spans: &[Span], marks: &[Marker], tolerance: u64) {
+    let mut owner = vec![0; spans.len()];
+    for (i, session) in sessions.iter().enumerate() {
+        for &span in &session.spans {
+            owner[span] = i;
+        }
+    }
+    for (k, marker) in marks.iter().enumerate() {
+        if !marker.mark.by_user() {
+            continue;
+        }
+        let t = marker.at;
+        let starting = (0..sessions.len())
+            .filter(|&i| sessions[i].start.0.abs_diff(t.0) <= tolerance)
+            .min_by_key(|&i| (sessions[i].start.0.abs_diff(t.0), std::cmp::Reverse(i)));
+        if let Some(i) = starting
+            && sessions[i].opened_by.is_none()
+        {
+            sessions[i].opened_by = Some(k);
+            continue;
+        }
+        let next = spans.partition_point(|s| s.end <= t);
+        let span = match (next < spans.len(), spans.len()) {
+            (true, _) => next,
+            (false, 0) => continue,
+            (false, n) => n - 1,
+        };
+        sessions[owner[span]].marks.push(k);
     }
 }
 
@@ -836,6 +931,8 @@ impl Describe<'_> {
             members,
             splits,
             confirmed,
+            opened_by: None,
+            marks: Vec::new(),
             spans,
         }
     }

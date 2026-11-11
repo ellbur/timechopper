@@ -25,11 +25,10 @@ It opens a 400×620 window that stays on top, in the bottom right corner of
 the screen. From the top:
 
 - **Now**: the clock, the window in focus, and the row it is part of, with
-  how long that has gone on (and the task's total for the day). Type what
-  you are starting and press *New task* (or just press it) to say "from
-  now on this is something else". The current task is cut at that second
-  and the earlier rows are left alone. *Undo* takes back the last
-  correction; hover over it to see which one that is.
+  how long that has gone on (and the task's total for the day). Below, a
+  note box with *Mark* and *Break*: mark the moment, with a note or
+  without, or the start of a break. *Undo* takes back the last marker or
+  correction; hover over it to see which.
 - **Rows**: newest first, each with its time, the time actually spent on it
   and what it seems to be about. Carve-outs are indented under the row they
   interrupted. A row that just changed shape (a window joined it, or a
@@ -39,15 +38,39 @@ the screen. From the top:
     is there); `?` marks the doubtful ones, and *own task…* takes one out,
     *just here* or *wherever it shows up*;
   - possible splits, each with *split here*;
+  - the markers made during it, each with *split here*, and the one it
+    starts at, with *use as name* (markers show under a row even when it is
+    closed);
   - *Name…*, *Confirm* (keep the row exactly as it is), *Join into…*
     another row's task, and *Split* at a time typed in.
 
   Hovering over any of these outlines in red the rows it would change.
-- **Focus changes**: the log itself, newest first, each entry marked with the
-  colour of the task it went to. Click one to open its row.
+- **Log**: focus changes, newest first, each in the colour of the task it
+  went to (click one to open its row), with markers between them: yours,
+  and windows opened and closed.
+
+### Markers
+
+A marker is something that happened at a moment: you noted something,
+started a break, a window was opened or closed. It is **not** a task. Notes
+are not taken to mean "this went on from here", and a note doesn't have to
+start anything. A marker is evidence of where one task may have ended:
+
+- Where the work itself changes, but not clearly enough for the guess to
+  split it (it would only offer the split, `?`), a note, a break or a
+  closed window at that moment (within 2 minutes) settles it: the row is
+  split there. The new row says which marker it starts at.
+- Where the work doesn't change, a marker cuts nothing. It is shown in the
+  row it falls in, for you to go back to when you reconstruct the day, with
+  *split here* if it was a change after all.
+- A window being opened counts for nothing, since new windows open all the
+  time within a task. It is only shown in the log.
+
+A cut a marker made can be undone like any other (*Join into…*).
 
 The window re-reads the whole day every second and on every focus change.
-Each focus change is appended to a log file as it happens, by default
+Each focus change and marker is appended to a log file as it happens, by
+default
 `%LOCALAPPDATA%\timechopper\YYYY-MM-DD.log` (`--log-file` to choose).
 Starting again on the same day carries on from it. Without keyboard or mouse
 input for 5 minutes (`--idle`), you are counted as away from when the input
@@ -57,7 +80,7 @@ the window you were in keeps the time.
 Not yet:
 
 - Corrections are not saved: closing the window loses them, though not
-  the log.
+  the log or the markers in it.
 - The day ends at midnight only by restarting: times are times of day.
 - There is no tray icon and no way to collapse the window to a single line.
 
@@ -84,6 +107,11 @@ when nothing is in use:
 09:04:30 notepad.exe *report.txt - Notepad
 09:08:30 -
 ```
+
+Markers go between them: `HH:MM:SS @note TEXT`, `@break TEXT`,
+`@opened APP TITLE`, `@closed APP TITLE`, and `@unmark HH:MM:SS` (a note or
+break taken back). `timechopper demo marked-day` shows a day with notes and
+a break, and `demo marked-day --log` shows its log.
 
 Ten focus changes between Notepad, a browser and (once) Outlook come out as:
 
@@ -121,7 +149,9 @@ up however the grouping is changed.
 3. **When.** A task left for more than 15 minutes and picked up again gets a
    new session ("part 2 of 2"); a shorter absence is an interruption within
    one session.
-4. **What to call it.** A session is named after the title part that had
+4. **Markers.** Where step 2 would only offer a split, a note, a break or a
+   closed window at that moment makes it. See [Markers](#markers).
+5. **What to call it.** A session is named after the title part that had
    focus the longest, whichever window it came from, so a browser's page
    titles can explain what an `Untitled` Notepad window was for.
 

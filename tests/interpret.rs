@@ -5,7 +5,9 @@ mod common;
 use common::check;
 use timechopper::interpret::render::{Detail, render};
 use timechopper::interpret::scenarios::{self, CODE, FIREFOX, NOTEPAD, OUTLOOK, Script, TERMINAL};
-use timechopper::interpret::{Hint, Lens, Params, Pattern, Span, Time, Timeline, interpret};
+use timechopper::interpret::{
+    Hint, Lens, Mark, Marker, Params, Pattern, Span, Time, Timeline, interpret, interpret_marked,
+};
 
 fn guess(spans: &[Span]) -> Timeline {
     read(spans, &[])
@@ -340,8 +342,19 @@ fn every_second_is_counted_once() {
             max_gap: [60, 900, 7200][round % 3],
             min_exclusive_share: [0.5, 0.2][round % 2],
             near_miss_share: [0.25, 0.0][round % 2],
+            mark_tolerance: [0, 120, 600][round % 3],
         };
-        let timeline = interpret(&spans, &hints, &params);
+        let marks: Vec<Marker> = (0..round % 5)
+            .map(|k| Marker {
+                at: dice.range().0,
+                mark: match (k % 3, spans.is_empty()) {
+                    (0, _) | (2, true) => Mark::Note(format!("note {k}")),
+                    (1, _) => Mark::Break(String::new()),
+                    _ => Mark::Closed(spans[k % spans.len()].window.clone()),
+                },
+            })
+            .collect();
+        let timeline = interpret_marked(&spans, &marks, &hints, &params);
         check(&spans, &timeline);
         render(&timeline, Detail::Contents);
     }

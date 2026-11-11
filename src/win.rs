@@ -2,6 +2,7 @@
 //! queries for the window's title/class and the owning process's details.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,14 +23,14 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND,
-    EnumChildWindows, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, KillTimer, MSG, OBJID_WINDOW, SetTimer,
-    TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_TIMER,
+    CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_NAMECHANGE,
+    EVENT_SYSTEM_FOREGROUND, EnumChildWindows, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, KillTimer, MSG, OBJID_WINDOW,
+    SetTimer, TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_TIMER,
 };
 use windows::core::{BOOL, PWSTR};
 
-use timechopper::interpret::{Time, Window};
+use timechopper::interpret::{Event, Mark, Marker, Record, Time, Window};
 use timechopper::live::{Clock, FnClock, Observation};
 
 use crate::{Feed, Options, UiOptions};
@@ -109,6 +110,17 @@ fn pump(exit_after: Option<Duration>, idle: Option<Duration>) -> ExitCode {
             0,
             flags,
         );
+        // Windows being closed (of all the windows on the desktop: only
+        // those that have had focus are reported).
+        let destroy_hook = SetWinEventHook(
+            EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_DESTROY,
+            None,
+            Some(on_event),
+            0,
+            0,
+            flags,
+        );
         if fg_hook.is_invalid() {
             eprintln!("timechopper: SetWinEventHook failed");
             return ExitCode::FAILURE;
@@ -156,6 +168,9 @@ fn pump(exit_after: Option<Duration>, idle: Option<Duration>) -> ExitCode {
         if !name_hook.is_invalid() {
             let _ = UnhookWinEvent(name_hook);
         }
+        if !destroy_hook.is_invalid() {
+            let _ = UnhookWinEvent(destroy_hook);
+        }
     }
     ExitCode::SUCCESS
 }
@@ -177,6 +192,12 @@ thread_local! {
     /// Whether the user is away (no input for a while) as far as the live
     /// window has been told.
     static AWAY: Cell<bool> = const { Cell::new(false) };
+    /// Windows that have had focus, as last seen: to say which was closed
+    /// (a closed window can no longer be asked).
+    static SEEN: RefCell<HashMap<isize, Window>> = RefCell::new(HashMap::new());
+    /// Whether anything has been reported yet: the window in focus when
+    /// watching starts was not opened then.
+    static STARTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Tells the live window the user has gone away, or come back, when the
@@ -197,7 +218,7 @@ fn check_idle(idle: Duration) {
             // Away since the last input, not since we noticed.
             let now = time_of_day(&unsafe { GetLocalTime() });
             let at = Time(now.0.saturating_sub(quiet.as_secs()));
-            send(Observation { at, window: None });
+            send(Record::Focus(Event { at, window: None }));
             LAST.with(|l| *l.borrow_mut() = None);
         }
         (true, false) => {
@@ -227,12 +248,22 @@ fn emit(stamp: &SYSTEMTIME, what: &str, hwnd: HWND) {
         // While away, focus moving by itself is not the user's doing.
         if !AWAY.get() {
             let window = (!hwnd.is_invalid()).then(|| window_of(hwnd));
-            send(Observation {
-                at: time_of_day(stamp),
-                window,
-            });
+            let at = time_of_day(stamp);
+            if let Some(window) = &window {
+                // A window seen for the first time has just been opened.
+                let new = SEEN.with(|s| s.borrow_mut().insert(hwnd.0 as isize, window.clone()));
+                if new.is_none() && STARTED.get() {
+                    let mark = Mark::Opened(window.clone());
+                    send(Record::Mark(Marker { at, mark }));
+                }
+            }
+            STARTED.set(true);
+            send(Record::Focus(Event { at, window }));
         }
         return;
+    }
+    if !hwnd.is_invalid() {
+        SEEN.with(|s| s.borrow_mut().insert(hwnd.0 as isize, window_of(hwnd)));
     }
     let stamp = format_stamp(stamp);
     match hwnd.is_invalid() {
@@ -277,7 +308,25 @@ unsafe extern "system" fn on_event(
         EVENT_OBJECT_NAMECHANGE if hwnd == unsafe { GetForegroundWindow() } => {
             report("title changed", hwnd)
         }
+        EVENT_OBJECT_DESTROY => closed(hwnd),
         _ => {}
+    }
+}
+
+/// A window was destroyed: report it if it is one that has had focus.
+fn closed(hwnd: HWND) {
+    let Some(window) = SEEN.with(|s| s.borrow_mut().remove(&(hwnd.0 as isize))) else {
+        return;
+    };
+    let stamp = timestamp();
+    let at = time_of_day(&stamp);
+    let mark = Mark::Closed(window.clone());
+    if !send(Record::Mark(Marker { at, mark })) {
+        println!(
+            "[{}] window closed: {:?}\n",
+            format_stamp(&stamp),
+            window.title
+        );
     }
 }
 

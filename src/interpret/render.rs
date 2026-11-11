@@ -44,7 +44,8 @@ fn doubts(member: &Member) -> Vec<String> {
 /// One row per session, in time order, each showing the time actually spent
 /// on it. A session carved out of another is indented under it; its time is
 /// not part of the outer session's. Lines starting with `?` point at what
-/// the guess is least sure of.
+/// the guess is least sure of; lines starting with `>` are what the user
+/// marked along the way.
 pub fn render(timeline: &Timeline, detail: Detail) -> String {
     let mut out = String::new();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); timeline.sessions.len()];
@@ -90,6 +91,15 @@ pub fn render(timeline: &Timeline, detail: Detail) -> String {
         let mut line = |marker: char, text: String| {
             out.push_str(&format!("{indent}{:19}{marker} {text}\n", ""));
         };
+        // The user's own markers: what they said at the time.
+        if let Some(k) = session.opened_by {
+            let m = &timeline.marks[k];
+            line('>', format!("{}  {} (starts here)", m.at.hm(), m.mark));
+        }
+        for &k in &session.marks {
+            let m = &timeline.marks[k];
+            line('>', format!("{}  {}", m.at.hm(), m.mark));
+        }
         if detail == Detail::Doubts && !session.label.also.is_empty() {
             let also: Vec<String> = session
                 .label

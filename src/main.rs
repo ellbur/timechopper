@@ -7,7 +7,9 @@ mod win;
 use std::process::ExitCode;
 
 use timechopper::interpret::render::{Detail, render};
-use timechopper::interpret::{Hint, Journal, Lens, Params, Pattern, Span, Time, model, scenarios};
+use timechopper::interpret::{
+    Hint, Journal, Lens, Marker, Params, Pattern, Record, Span, Time, model, scenarios,
+};
 
 const USAGE: &str = "\
 Usage: timechopper [--once] [--exit-after <SECONDS>]
@@ -37,7 +39,10 @@ keyboard or mouse input for <MINUTES> (default 5) counts as away.
 With --replay it plays a built-in synthetic log instead, <N> times faster
 than real time (default 60), on any platform.
 
-Each row is followed by '?' lines pointing at what the guess is least sure of.
+Each row is followed by '?' lines pointing at what the guess is least sure of,
+and '>' lines with what was marked during it (in a log: HH:MM:SS @note TEXT,
+@break TEXT, @opened APP TITLE, @closed APP TITLE). A marker settles a split
+the guess would only offer; it never starts a task by itself.
 
 Interpretation options:
   --contents                      List everything swept into each row
@@ -266,7 +271,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_timeline(spans: &[Span], reading: &Reading) {
+fn print_timeline(spans: &[Span], marks: &[Marker], reading: &Reading) {
     // Replay the log the way the watcher would feed it, stopping early if
     // asked to show how things stood at some point.
     let mut journal = Journal::new(reading.params.clone());
@@ -283,6 +288,9 @@ fn print_timeline(spans: &[Span], reading: &Reading) {
     if free < now {
         journal.observe(free, None);
     }
+    for marker in marks {
+        journal.mark(marker.clone());
+    }
     for hint in &reading.hints {
         journal.apply(hint.clone());
     }
@@ -297,8 +305,15 @@ fn print_timeline(spans: &[Span], reading: &Reading) {
 
 fn summarize(path: &str, reading: &Reading) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let events = model::parse_log(&text).map_err(|e| format!("{path}: {e}"))?;
-    print_timeline(&model::spans(&events), reading);
+    let records = model::parse_records(&text).map_err(|e| format!("{path}: {e}"))?;
+    let events: Vec<_> = records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Focus(e) => Some(e.clone()),
+            _ => None,
+        })
+        .collect();
+    print_timeline(&model::spans(&events), &model::markers(&records), reading);
     Ok(())
 }
 
@@ -316,15 +331,16 @@ fn demo(name: Option<&str>, log: bool, reading: &Reading) -> Result<(), String> 
     }
     for (i, scenario) in chosen.iter().enumerate() {
         let spans = (scenario.spans)();
+        let marks = (scenario.marks)();
         if log {
-            print!("{}", model::format_log(&spans));
+            print!("{}", timechopper::live::log_text(&spans, &marks));
             continue;
         }
         if i > 0 {
             println!();
         }
         println!("== {}: {}", scenario.name, scenario.about);
-        print_timeline(&spans, reading);
+        print_timeline(&spans, &marks, reading);
     }
     Ok(())
 }
@@ -354,15 +370,16 @@ fn live(opts: UiOptions) -> Result<(), String> {
                     let names: Vec<_> = scenarios::ALL.iter().map(|s| s.name).collect();
                     format!("no such scenario; try one of: {}", names.join(", "))
                 })?;
-            let (clock, feed) = live::replay((scenario.spans)(), opts.speed, wake);
+            let (clock, feed) =
+                live::replay((scenario.spans)(), (scenario.marks)(), opts.speed, wake);
             (clock, feed, None)
         }
         None => {
             let (clock, feed, path) = watch(&opts, Box::new(wake))?;
             let (log, earlier) =
                 live::LogFile::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            for event in earlier {
-                journal.observe(event.at, event.window);
+            for record in earlier {
+                journal.record(record);
             }
             (clock, feed, Some(log))
         }

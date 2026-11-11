@@ -39,6 +39,10 @@ try {
 
     $shot = Join-Path $VideoDir 'live-window.png'
     ffmpeg -hide_banner -loglevel error -y -f gdigrab -i desktop -frames:v 1 $shot
+    # Close Notepad properly, for the live window to note it closed.
+    $np.CloseMainWindow() | Out-Null
+    if (-not $np.WaitForExit(10000)) { throw 'Notepad did not close' }
+    Start-Sleep -Seconds 2
     if ($ui.HasExited) { throw "the live window exited early (code $($ui.ExitCode))" }
 }
 finally {
@@ -56,4 +60,6 @@ if ($out -notmatch '(?m)^\d\d:\d\d:\d\d notepad\.exe timechopper-ui\.txt') { thr
 if ($out -notmatch '(?m)^\d\d:\d\d:\d\d Calculator(App)?\.exe Calculator') { throw 'Calculator missing from the focus log' }
 $switches = ([regex]::Matches($out, '(?m)^\d\d:\d\d:\d\d notepad\.exe')).Count
 if ($switches -lt 3) { throw "expected Notepad in focus at least 3 times, got $switches" }
+if ($out -notmatch '(?m)^\d\d:\d\d:\d\d @opened Calculator(App)?\.exe Calculator') { throw 'Calculator was not noted as opened' }
+if ($out -notmatch '(?m)^\d\d:\d\d:\d\d @closed notepad\.exe timechopper-ui\.txt') { throw 'Notepad was not noted as closed' }
 Write-Host 'Live window smoke test passed'

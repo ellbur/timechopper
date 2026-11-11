@@ -9,8 +9,8 @@
 //! [`Timeline::name`], [`Timeline::confirm`]), may show what it would do
 //! ([`Journal::preview`]), and applies it ([`Journal::apply`]).
 
-use super::model::{Span, Time, Window};
-use super::{Hint, Params, Pattern, Session, Timeline, interpret};
+use super::model::{Marker, Record, Span, Time, Window};
+use super::{Hint, Params, Pattern, Session, Timeline, interpret_marked};
 
 /// A log, as far as it has got, and what the user has said about it.
 #[derive(Clone, Debug, Default)]
@@ -18,6 +18,7 @@ pub struct Journal {
     spans: Vec<Span>,
     /// The window in focus now, and since when.
     open: Option<(Time, Window)>,
+    marks: Vec<Marker>,
     hints: Vec<Hint>,
     pub params: Params,
 }
@@ -55,6 +56,36 @@ impl Journal {
         self.open = window.map(|w| (at, w));
     }
 
+    /// Something was marked: by the user, or a window opening or closing.
+    pub fn mark(&mut self, marker: Marker) {
+        let i = self.marks.partition_point(|m| m.at <= marker.at);
+        self.marks.insert(i, marker);
+    }
+
+    /// Takes back the user's (latest) marker made at `at`.
+    pub fn unmark(&mut self, at: Time) -> Option<Marker> {
+        let i = self
+            .marks
+            .iter()
+            .rposition(|m| m.at == at && m.mark.by_user())?;
+        Some(self.marks.remove(i))
+    }
+
+    /// Takes in one line of a log.
+    pub fn record(&mut self, record: Record) {
+        match record {
+            Record::Focus(event) => self.observe(event.at, event.window),
+            Record::Mark(marker) => self.mark(marker),
+            Record::Unmark { mark, .. } => {
+                self.unmark(mark);
+            }
+        }
+    }
+
+    pub fn marks(&self) -> &[Marker] {
+        &self.marks
+    }
+
     fn close(&mut self, start: Time, end: Time, window: Window) {
         if end <= start {
             return;
@@ -80,7 +111,8 @@ impl Journal {
 
     /// The interpretation of everything up to `now`.
     pub fn timeline(&self, now: Time) -> Timeline {
-        interpret(&self.spans(now), &self.hints, &self.params)
+        let marks: Vec<Marker> = self.marks.iter().filter(|m| m.at <= now).cloned().collect();
+        interpret_marked(&self.spans(now), &marks, &self.hints, &self.params)
     }
 
     pub fn hints(&self) -> &[Hint] {

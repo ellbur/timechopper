@@ -11,7 +11,7 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use timechopper::interpret::scenarios::{self, FIREFOX, NOTEPAD, OUTLOOK};
-use timechopper::interpret::{Journal, Params, Span, Time, Window};
+use timechopper::interpret::{Event, Journal, Mark, Marker, Params, Record, Span, Time, Window};
 use timechopper::live::{self, FnClock, Observation};
 use timechopper::ui::Live;
 
@@ -31,10 +31,10 @@ impl Rig {
             title: title.into(),
         };
         self.send
-            .send(Observation {
+            .send(Record::Focus(Event {
                 at: t,
                 window: Some(window),
-            })
+            }))
             .unwrap();
         self.at(t);
     }
@@ -42,11 +42,15 @@ impl Rig {
     /// Feeds a whole log, leaving the clock at its end with its last
     /// window still in focus.
     fn play(&self, spans: &[Span]) {
-        let mut events = live::events(spans);
-        let end = events.pop().unwrap().at;
-        for event in events {
-            self.at(event.at);
-            self.send.send(event).unwrap();
+        self.play_marked(spans, &[]);
+    }
+
+    fn play_marked(&self, spans: &[Span], marks: &[Marker]) {
+        let mut records = live::records(spans, marks);
+        let end = live::at(&records.pop().unwrap());
+        for record in records {
+            self.at(live::at(&record));
+            self.send.send(record).unwrap();
         }
         self.at(end);
     }
@@ -126,42 +130,95 @@ fn focus_changes_show_up_as_they_happen() {
 }
 
 #[test]
-fn new_task_starts_from_now_and_leaves_the_morning_alone() {
+fn marking_a_moment_records_it_without_starting_a_task() {
     let (mut h, rig) = harness();
-    rig.play(&(scenarios::ALL[0].spans)());
+    rig.play(&(scenarios::ALL[0].spans)()); // alternation, still going
     h.run();
     let before = h.state().timeline().clone();
-    let now = h.state().timeline().sessions[0].end;
+    let now = before.sessions[0].end;
 
     h.get_by_role(Role::TextInput).click();
     h.run();
     h.get_by_role(Role::TextInput).type_text("Budget");
     h.run();
-    h.get_by_label("New task").click();
+    h.get_by_label("Mark").click();
     h.run();
 
-    // Carry on in the same windows: that is now the new task.
-    let later = Time(now.0 + 600);
-    rig.at(later);
+    // The same windows carry on: still the same task, with the note in it.
+    rig.at(Time(now.0 + 600));
     h.run();
     let timeline = h.state().timeline();
-    let current = h.state().current_session().unwrap();
-    let task = &timeline.tasks[timeline.sessions[current].task];
-    assert_eq!(task.name.as_deref(), Some("Budget"));
-    assert_eq!(timeline.sessions[current].start, now);
-    assert_eq!(timeline.sessions[current].active, 600);
-    // What came before is untouched.
-    assert_eq!(timeline.sessions[0].start, before.sessions[0].start);
-    assert_eq!(timeline.sessions[0].active, before.sessions[0].active);
-    assert!(h.query_all_by_label("Budget").count() >= 2); // now, and the row
+    assert_eq!(timeline.sessions.len(), 1);
+    assert_eq!(timeline.sessions[0].active, before.sessions[0].active + 600);
+    assert!(timeline.tasks[0].name.is_none());
+    assert_eq!(timeline.marks.len(), 1);
+    assert_eq!(timeline.marks[0].at, now);
+    assert_eq!(timeline.sessions[0].marks, [0]);
+    let line = format!("> {}  marked \"Budget\"", now.hm());
+    assert!(h.query_by_label(&line).is_some());
+    // It is in the log too, between the focus changes.
+    assert!(h.query_by_label("marked \"Budget\"").is_some());
 
-    // Undo takes it back.
-    h.get_by_label("Undo").click();
+    // When the work does change around it, the marker counts. Open the row
+    // to split it there.
+    let title = timeline.sessions[0].label.headline.clone();
+    h.get_all_by_label(&title).last().unwrap().click();
     h.run();
+    h.get_by_label("split here").click();
+    h.run();
+    let split = h.state().timeline();
+    assert_eq!(split.sessions.len(), 2);
+    assert_eq!(split.sessions[1].start, now);
+    assert_eq!(split.sessions[1].opened_by, Some(0));
+    // The row it starts can take its name from it.
+    let line = format!("> {}  marked \"Budget\"  (starts here)", now.hm());
+    assert!(h.query_by_label(&line).is_some());
+
+    // Undo takes back the split, then the marker.
     h.get_by_label("Undo").click();
     h.run();
     assert_eq!(h.state().timeline().sessions.len(), 1);
-    assert!(h.state().journal().hints().is_empty());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert!(h.state().timeline().marks.is_empty());
+    assert!(h.state().journal().marks().is_empty());
+}
+
+#[test]
+fn a_break_is_a_marker_too() {
+    let (mut h, rig) = harness();
+    rig.focus(t("09:00"), NOTEPAD, "report.txt - Notepad");
+    rig.at(t("09:20"));
+    h.run();
+    h.get_by_label("Break").click();
+    h.run();
+    let marks = h.state().journal().marks();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].mark, Mark::Break(String::new()));
+    assert_eq!(marks[0].at, t("09:20"));
+    assert!(h.query_by_label("> 09:20  break").is_some());
+}
+
+#[test]
+fn a_marked_day_replayed_shows_its_markers_with_their_rows() {
+    let (mut h, rig) = harness();
+    rig.play_marked(&scenarios::marked_day(), &scenarios::marked_day_marks());
+    h.run();
+    let timeline = h.state().timeline();
+    assert_eq!(timeline.sessions.len(), 4);
+    assert!(
+        h.query_by_label("> 09:33  marked \"invoice export\"  (starts here)")
+            .is_some()
+    );
+    assert!(
+        h.query_by_label("> 09:53  marked \"Sam called about the export format\"")
+            .is_some()
+    );
+    // Windows closed are in the log, not in the rows.
+    assert!(
+        h.query_by_label_contains("closed Search result 11")
+            .is_some()
+    );
 }
 
 #[test]
@@ -254,10 +311,10 @@ fn going_away_closes_the_row() {
     let (mut h, rig) = harness();
     rig.focus(t("09:00"), NOTEPAD, "report.txt - Notepad");
     rig.send
-        .send(Observation {
+        .send(Record::Focus(Event {
             at: t("09:10"),
             window: None,
-        })
+        }))
         .unwrap();
     rig.at(t("09:30"));
     h.run();
